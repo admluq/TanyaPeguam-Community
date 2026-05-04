@@ -7,6 +7,17 @@ Link tree style profile pages untuk peguam Malaysia, dengan format:
 
 ---
 
+> ⚠️ **PENTING — Branch Protection Convention**
+> 
+> Repo ni **TIDAK ENFORCE** branch protection (private repo limitation).
+> Tapi semua collaborator MESTI ikut workflow ni:
+> 
+> ❌ **JANGAN** push terus ke `main`  
+> ✅ **WAJIB** buat feature branch + Pull Request  
+> ✅ **TUNGGU** approval dari @d7kijo sebelum merge
+> 
+> Pelanggaran convention = revoke access. Serious.
+
 ## 🎯 Project Overview
 
 Setiap peguam yang berdaftar dengan TanyaPeguam.com akan dapat satu landing page peribadi — macam Linktree tapi:
