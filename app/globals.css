@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =====================================================
+   tptree — Global Styles
+   Refined dark luxury aesthetic with gold accents
+   ===================================================== */
+
+@layer base {
+  :root {
+    /* Custom font stack — refined, lawyerly */
+    --font-display: 'Cormorant Garamond', 'Playfair Display', Georgia, serif;
+    --font-sans: 'Inter Tight', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-ink-400 text-cream font-sans;
+    background-image:
+      radial-gradient(ellipse at top, rgba(201, 169, 97, 0.04), transparent 60%),
+      radial-gradient(ellipse at bottom, rgba(201, 169, 97, 0.02), transparent 60%);
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+
+  /* Selection color */
+  ::selection {
+    @apply bg-gold/30 text-cream;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-ink-300;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-ink-50 rounded;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gold/30;
+  }
+}
+
+@layer components {
+  /* Card base style — used across profile components */
+  .card-base {
+    @apply bg-ink-200 border border-ink-50 rounded-2xl
+           transition-all duration-300 ease-out;
+  }
+
+  .card-base:hover {
+    @apply border-gold/30 bg-ink-100;
+  }
+
+  /* Gold gradient text */
+  .text-gold-gradient {
+    background: linear-gradient(135deg, #dec486 0%, #c9a961 50%, #b89548 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Subtle border with gold accent on hover */
+  .border-luxe {
+    @apply border border-ink-50 hover:border-gold/40 transition-colors;
+  }
+}
+
+@layer utilities {
+  /* Noise overlay for texture */
+  .noise-overlay {
+    position: relative;
+  }
+  .noise-overlay::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: var(--tw-bg-noise);
+    opacity: 0.03;
+    pointer-events: none;
+    mix-blend-mode: overlay;
+  }
+}
