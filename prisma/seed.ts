@@ -140,65 +140,60 @@ async function main() {
   console.log(`✅ ${adam.slug} — ${adam.name} (${adam.links?.length ?? 8} links)`);
 
   // ══════════════════════════════════════════════════════
-  // Profile 2 — Rizlan
-  // TODO: Update with real contact details
+  // Profile 2 — Rizlan Ghazali
   // ══════════════════════════════════════════════════════
   const rizlan = await prisma.profile.create({
     data: {
       slug: 'rizlan',
-      name: 'Rizlan',
+      name: 'Rizlan Ghazali',
       title: 'Peguam Bela & Peguam Cara',
       firm: 'Rizlan & Associates',
       firmFull: 'Rizlan & Associates Advocates & Solicitors',
-      monogram: 'RL',
+      monogram: 'RG',
       location: 'Kuala Lumpur',
       status: Status.AVAILABLE,
       practiceAreas: ['Jenayah', 'Sivil'],
       isVerified: true,
       bio: 'Peguam berpengalaman dalam bidang jenayah dan sivil. Berkomited untuk memberikan representasi guaman yang efektif dan beretika.',
-      metaTitle: 'Rizlan — Peguam Bela & Peguam Cara | TanyaPeguam',
-      metaDescription: 'Peguam pakar jenayah dan sivil di Kuala Lumpur. Hubungi Rizlan terus melalui WhatsApp.',
+      metaTitle: 'Rizlan Ghazali — Peguam Bela & Peguam Cara | TanyaPeguam',
+      metaDescription: 'Peguam pakar jenayah dan sivil. Hubungi Rizlan Ghazali terus melalui WhatsApp.',
       links: {
         create: [
           {
             type: LinkType.WHATSAPP,
             label: 'WhatsApp Saya',
             subtitle: 'Hubungi untuk konsultasi',
-            // TODO: Replace with real WhatsApp number
-            url: 'https://wa.me/60111234567?text=Salam%20Encik%20Rizlan,%20saya%20ingin%20mendapatkan%20khidmat%20guaman.',
+            url: 'https://wa.me/60145105382?text=Salam%20Encik%20Rizlan,%20saya%20ingin%20mendapatkan%20khidmat%20guaman.',
             displayOrder: 1,
             metadata: {
-              phone: '+60111234567',
+              phone: '+60145105382',
               prefilledMessage: 'Salam Encik Rizlan, saya ingin mendapatkan khidmat guaman.',
             },
           },
           {
             type: LinkType.PHONE,
             label: 'Telefon',
-            subtitle: 'Waktu pejabat',
-            // TODO: Replace with real number
-            url: 'tel:+60111234567',
+            subtitle: '014-510 5382 · Waktu pejabat',
+            url: 'tel:+60145105382',
             displayOrder: 2,
           },
           {
             type: LinkType.LINKEDIN,
             label: 'LinkedIn',
             subtitle: 'Pandangan & artikel undang-undang',
-            // TODO: Replace with real LinkedIn
-            url: 'https://linkedin.com/in/rizlanlawyer',
+            url: 'https://www.linkedin.com/in/rizlan-ghazali-482942170/',
             displayOrder: 3,
-            metadata: { handle: 'rizlanlawyer' },
+            metadata: { handle: 'rizlan-ghazali-482942170' },
           },
           {
             type: LinkType.FACEBOOK,
             label: 'Facebook',
-            subtitle: 'Halaman rasmi Rizlan & Associates',
-            // TODO: Replace with real Facebook
-            url: 'https://facebook.com/rizlanlaw',
+            subtitle: 'Rizlan Ghazali Chewan',
+            url: 'https://www.facebook.com/rizlan.ghazali.chewan/',
             displayOrder: 4,
             metadata: {
-              pageId: 'rizlanlaw',
-              stats: { likes: 950, followers: 1100, rating: 4.7 },
+              pageId: 'rizlan.ghazali.chewan',
+              stats: { likes: 0, followers: 0, rating: 5.0 },
             },
           },
           {
@@ -215,13 +210,12 @@ async function main() {
   console.log(`✅ ${rizlan.slug} — ${rizlan.name} (5 links)`);
 
   // ══════════════════════════════════════════════════════
-  // Profile 3 — Arif Azmi
-  // TODO: Update with real contact details
+  // Profile 3 — Muhammad Arif Azmi
   // ══════════════════════════════════════════════════════
   const arifAzmi = await prisma.profile.create({
     data: {
       slug: 'arifazmi',
-      name: 'Arif Azmi',
+      name: 'Muhammad Arif Azmi',
       title: 'Peguam Bela & Peguam Cara',
       firm: 'Arif Azmi & Co',
       firmFull: 'Arif Azmi & Co Advocates & Solicitors',
@@ -231,76 +225,66 @@ async function main() {
       practiceAreas: ['Korporat', 'Hartanah'],
       isVerified: true,
       bio: 'Pakar dalam undang-undang korporat dan hartanah. Membantu individu dan syarikat menangani isu undang-undang perniagaan dan pelaburan hartanah.',
-      metaTitle: 'Arif Azmi — Peguam Bela & Peguam Cara | TanyaPeguam',
-      metaDescription: 'Peguam pakar korporat dan hartanah di Kuala Lumpur. Hubungi Arif Azmi terus melalui WhatsApp.',
+      metaTitle: 'Muhammad Arif Azmi — Peguam Bela & Peguam Cara | TanyaPeguam',
+      metaDescription: 'Peguam pakar korporat dan hartanah. Hubungi Muhammad Arif Azmi terus melalui WhatsApp.',
       links: {
         create: [
           {
             type: LinkType.WHATSAPP,
             label: 'WhatsApp Saya',
             subtitle: 'Hubungi untuk konsultasi',
-            // TODO: Replace with real WhatsApp number
-            url: 'https://wa.me/60129876543?text=Salam%20Encik%20Arif%20Azmi,%20saya%20ingin%20mendapatkan%20khidmat%20guaman.',
+            url: 'https://wa.me/60165577745?text=Salam%20Encik%20Arif%20Azmi,%20saya%20ingin%20mendapatkan%20khidmat%20guaman.',
             displayOrder: 1,
             metadata: {
-              phone: '+60129876543',
+              phone: '+60165577745',
               prefilledMessage: 'Salam Encik Arif Azmi, saya ingin mendapatkan khidmat guaman.',
             },
           },
           {
             type: LinkType.PHONE,
             label: 'Telefon',
-            subtitle: 'Waktu pejabat',
-            // TODO: Replace with real number
-            url: 'tel:+60129876543',
+            subtitle: '016-557 7745 · Waktu pejabat',
+            url: 'tel:+60165577745',
             displayOrder: 2,
-          },
-          {
-            type: LinkType.WEBSITE,
-            label: 'Arif Azmi & Co',
-            subtitle: 'arifazmi.com.my',
-            // TODO: Replace with real website
-            url: 'https://arifazmi.com.my',
-            displayOrder: 3,
-            metadata: { domain: 'arifazmi.com.my' },
           },
           {
             type: LinkType.LINKEDIN,
             label: 'LinkedIn',
             subtitle: 'Artikel & insights korporat',
-            // TODO: Replace with real LinkedIn
-            url: 'https://linkedin.com/in/arifazmi',
-            displayOrder: 4,
-            metadata: { handle: 'arifazmi' },
+            url: 'https://my.linkedin.com/in/muhammad-arif-azmi-2958ab117',
+            displayOrder: 3,
+            metadata: { handle: 'muhammad-arif-azmi-2958ab117' },
           },
           {
-            type: LinkType.INSTAGRAM,
-            label: 'Instagram',
-            subtitle: '@arifazmilaw',
-            // TODO: Replace with real Instagram
-            url: 'https://instagram.com/arifazmilaw',
-            displayOrder: 5,
-            metadata: { handle: 'arifazmilaw' },
+            type: LinkType.FACEBOOK,
+            label: 'Facebook',
+            subtitle: 'Arif Azmi & Co',
+            url: 'https://www.facebook.com/arifazmico/',
+            displayOrder: 4,
+            metadata: {
+              pageId: 'arifazmico',
+              stats: { likes: 0, followers: 0, rating: 5.0 },
+            },
           },
           {
             type: LinkType.AI_CHAT,
             label: 'Tanya Lia — AI Undang-Undang',
             subtitle: 'Jawapan segera, percuma',
-            displayOrder: 6,
+            displayOrder: 5,
             metadata: { agentId: 'lia' },
           },
         ],
       },
     },
   });
-  console.log(`✅ ${arifAzmi.slug} — ${arifAzmi.name} (6 links)`);
+  console.log(`✅ ${arifAzmi.slug} — ${arifAzmi.name} (5 links)`);
 
   console.log('\n🎉 Seeding complete!\n');
   console.log('Profile URLs:');
   console.log('   http://localhost:3000/adamluqman');
   console.log('   http://localhost:3000/rizlan');
   console.log('   http://localhost:3000/arifazmi');
-  console.log('\n⚠️  TODO: Update placeholder contact details for Rizlan & Arif Azmi in seed.ts');
+  console.log('\n⚠️  Seterusnya: Tambah ANTHROPIC_API_KEY dalam .env untuk aktifkan Lia AI.');
 }
 
 main()
