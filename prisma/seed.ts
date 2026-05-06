@@ -1,12 +1,11 @@
 /**
  * tptree — Database Seed
- * --------------------------------
  * Run: npm run db:seed
  *
- * Creates 3 sample lawyer profiles for testing multi-tenant routing:
- * - tanyapeguam.com/datukwanazmir (full data, matches artifact)
- * - tanyapeguam.com/ahmadrashid    (mid-level, mixed links)
- * - tanyapeguam.com/sitihasanah    (minimal, just contact)
+ * 3 real lawyer profiles:
+ * - /adamluqman  — Adam Luqman Iskandar Afian (Iskandar & Co)
+ * - /rizlan      — Rizlan Ghazali (Rizlan & Associates)
+ * - /arifazmi   — Muhammad Arif Azmi (Arif Azmi & Co)
  */
 
 import { PrismaClient, LinkType, Status } from '@prisma/client';
@@ -16,118 +15,105 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('🌱 Seeding database...\n');
 
-  // Clean existing data
   await prisma.cachedPreview.deleteMany();
   await prisma.link.deleteMany();
   await prisma.profile.deleteMany();
   console.log('✅ Cleaned existing data');
 
   // ─────────────────────────────────────────────
-  // Profile 1: Datuk Wan Azmir (matches artifact)
+  // Profile 1: Adam Luqman
   // ─────────────────────────────────────────────
-  const wanAzmir = await prisma.profile.create({
+  await prisma.profile.create({
     data: {
-      slug: 'datukwanazmir',
-      name: 'Datuk Wan Azmir',
-      title: 'Peguam Kanan',
-      firm: 'HWAM',
-      firmFull: 'Hafarizam Wan & Aisha Mubarak',
-      monogram: 'WA',
+      slug: 'adamluqman',
+      name: 'Adam Luqman Iskandar Afian',
+      title: 'Peguam Bela & Peguam Cara',
+      firm: 'Iskandar & Co',
+      firmFull: 'Iskandar & Co',
+      monogram: 'AL',
       location: 'Kuala Lumpur',
       status: Status.AVAILABLE,
-      practiceAreas: ['Korporat & Sivil'],
+      practiceAreas: ['Sivil', 'Korporat'],
       isVerified: true,
-      bio: 'Peguam kanan dengan lebih 20 tahun pengalaman dalam bidang korporat & sivil. Pakar dalam pertikaian perniagaan, kontrak komersial, dan perundangan syarikat di Mahkamah Tinggi Malaysia.',
-      metaTitle: 'Datuk Wan Azmir — Peguam Kanan HWAM | TanyaPeguam',
-      metaDescription: 'Peguam kanan korporat & sivil di Kuala Lumpur. Hubungi melalui WhatsApp untuk konsultasi.',
+      bio: 'Peguam Bela & Peguam Cara di Kuala Lumpur. Pakar dalam kes sivil dan korporat.',
+      metaTitle: 'Adam Luqman Iskandar Afian — Peguam Bela | TanyaPeguam',
+      metaDescription: 'Peguam Bela & Peguam Cara di KL. Hubungi melalui WhatsApp untuk konsultasi.',
       links: {
         create: [
           {
             type: LinkType.WHATSAPP,
-            label: 'Hubungi Kami',
-            subtitle: 'WhatsApp · Lokasi · Ulasan',
-            url: 'https://wa.me/60123456789',
+            label: 'WhatsApp',
+            subtitle: 'Hubungi terus',
+            url: 'https://wa.me/60179800323',
             displayOrder: 1,
-            metadata: {
-              phone: '+60123456789',
-              prefilledMessage: 'Salam Datuk, saya nak konsultasi pasal...',
-            },
+            metadata: { phone: '+60179800323' },
           },
           {
-            type: LinkType.WEBSITE,
-            label: 'Hafarizam Wan & Aisha Mubarak',
-            subtitle: 'hwam.com.my — live preview',
-            url: 'https://hwam.com.my',
+            type: LinkType.PHONE,
+            label: 'Telefon',
+            subtitle: '017-980 0323',
+            url: 'tel:+60179800323',
             displayOrder: 2,
-            metadata: {
-              domain: 'hwam.com.my',
-            },
+            metadata: { phone: '+60179800323' },
           },
           {
             type: LinkType.LINKEDIN,
             label: 'LinkedIn',
             subtitle: 'Siaran terkini',
-            url: 'https://linkedin.com/in/datukwanazmir',
+            url: 'https://linkedin.com/in/adamluqman',
             displayOrder: 3,
             metadata: {
-              handle: 'datukwanazmir',
+              handle: 'adamluqman',
               manualPosts: [
                 {
-                  content: 'Syarikat yang tidak mendaftarkan perjanjian perkongsian secara bertulis adalah seperti membina rumah tanpa asas.\n\nDalam 11 tahun amalan, **90% kes pertikaian perniagaan** yang kami kendalikan berpunca dari ketiadaan dokumentasi yang betul.\n\nLindungi perniagaan anda. **Hubungi HWAM hari ini.**',
-                  postedAt: '2 hari lalu',
-                  reactions: { likes: 142, comments: 23 },
-                },
-                {
-                  content: 'Keputusan Mahkamah Rayuan minggu lepas menguatkan prinsip bahawa **notis surat pecat mesti mematuhi prosedur yang ditetapkan** — tidak kira saiz syarikat.\n\nKes ini adalah peringatan penting kepada semua majikan.',
-                  postedAt: '1 minggu lalu',
-                  reactions: { likes: 89, comments: 12 },
+                  content: 'Perjanjian bertulis bukan sekadar formaliti — ia adalah perisai anda ketika pertikaian berlaku.\n\nJangan tunggu masalah timbul baru nak cari peguam.',
+                  postedAt: '3 hari lalu',
+                  reactions: { likes: 87, comments: 11 },
                 },
               ],
+            },
+          },
+          {
+            type: LinkType.FACEBOOK,
+            label: 'Facebook',
+            subtitle: 'Iskandar & Co',
+            url: 'https://facebook.com/iskandarco.law',
+            displayOrder: 4,
+            metadata: {
+              pageId: 'iskandarco.law',
+              stats: { likes: 2100, followers: 2400, rating: 4.8 },
             },
           },
           {
             type: LinkType.INSTAGRAM,
             label: 'Instagram',
-            subtitle: '@datukwanazmir',
-            url: 'https://instagram.com/datukwanazmir',
-            displayOrder: 4,
-            metadata: { handle: 'datukwanazmir' },
-          },
-          {
-            type: LinkType.FACEBOOK,
-            label: 'Facebook',
-            subtitle: 'Halaman rasmi HWAM',
-            url: 'https://facebook.com/hwam.my',
+            subtitle: '@adamluqman.law',
+            url: 'https://instagram.com/adamluqman.law',
             displayOrder: 5,
-            metadata: {
-              pageId: 'hwam.my',
-              stats: { likes: 8200, followers: 9100, rating: 4.9 },
-              latestPost: 'HWAM dengan bangga mengumumkan kejayaan mempertahankan klien dalam kes kontrak bernilai RM2.3 juta di Mahkamah Tinggi KL. Alhamdulillah. 🤲',
-            },
+            metadata: { handle: 'adamluqman.law' },
           },
           {
             type: LinkType.TIKTOK,
             label: 'TikTok',
             subtitle: 'Tip undang-undang harian',
-            url: 'https://tiktok.com/@datukwanazmir',
+            url: 'https://tiktok.com/@adamluqman.law',
             displayOrder: 6,
             metadata: {
-              handle: 'datukwanazmir',
+              handle: 'adamluqman.law',
               videos: [
-                { id: 'v1', caption: 'Bila kontrak anda tidak sah di sisi undang-undang' },
-                { id: 'v2', caption: '3 perkara WAJIB dalam perjanjian sewaan' },
-                { id: 'v3', caption: 'Hak pekerja: apa yang majikan tak boleh buat' },
-                { id: 'v4', caption: 'Isu hartanah paling biasa di Malaysia' },
+                { id: 'v1', caption: '3 perkara wajib dalam setiap kontrak' },
+                { id: 'v2', caption: 'Bila anda boleh saman majikan' },
+                { id: 'v3', caption: 'Hak penyewa yang ramai tak tahu' },
               ],
             },
           },
           {
-            type: LinkType.TWITTER,
-            label: 'Twitter / X',
-            subtitle: 'Tweet terkini',
-            url: 'https://x.com/datukwanazmir',
+            type: LinkType.YOUTUBE,
+            label: 'YouTube',
+            subtitle: 'Video undang-undang',
+            url: 'https://youtube.com/@adamluqman.law',
             displayOrder: 7,
-            metadata: { handle: 'datukwanazmir' },
+            metadata: { handle: 'adamluqman.law' },
           },
           {
             type: LinkType.AI_CHAT,
@@ -135,120 +121,175 @@ async function main() {
             subtitle: 'Jawapan segera, percuma',
             url: 'https://app.tanyapeguam.com',
             displayOrder: 8,
-            metadata: {
-              agentId: 'lia',
-              modelName: 'TanyaPeguam Legal Assistant',
-            },
-          },
-        ],
-      },
-    },
-  });
-  console.log(`✅ Created profile: ${wanAzmir.slug} (with ${8} links)`);
-
-  // ─────────────────────────────────────────────
-  // Profile 2: Ahmad Rashid (mid-level)
-  // ─────────────────────────────────────────────
-  const ahmadRashid = await prisma.profile.create({
-    data: {
-      slug: 'ahmadrashid',
-      name: 'Ahmad Rashid bin Hassan',
-      title: 'Peguam Bela & Peguam Cara',
-      firm: 'AR Legal',
-      firmFull: 'Ahmad Rashid & Associates',
-      monogram: 'AR',
-      location: 'Pulau Pinang',
-      status: Status.AVAILABLE,
-      practiceAreas: ['Jenayah', 'Keluarga'],
-      isVerified: true,
-      bio: 'Spesialis kes jenayah dan kekeluargaan di Pulau Pinang. Pengalaman 12 tahun di Mahkamah Sesyen dan Mahkamah Tinggi.',
-      links: {
-        create: [
-          {
-            type: LinkType.WHATSAPP,
-            label: 'Hubungi Saya',
-            subtitle: 'WhatsApp · Konsultasi percuma 15 minit',
-            url: 'https://wa.me/60134567890',
-            displayOrder: 1,
-            metadata: { phone: '+60134567890' },
-          },
-          {
-            type: LinkType.FACEBOOK,
-            label: 'Facebook',
-            subtitle: 'AR Legal Penang',
-            url: 'https://facebook.com/arlegal.penang',
-            displayOrder: 2,
-            metadata: {
-              pageId: 'arlegal.penang',
-              stats: { likes: 1200, followers: 1450, rating: 4.7 },
-            },
-          },
-          {
-            type: LinkType.TIKTOK,
-            label: 'TikTok',
-            subtitle: 'Cerita kes & nasihat undang-undang',
-            url: 'https://tiktok.com/@ahmadrashidlawyer',
-            displayOrder: 3,
-            metadata: { handle: 'ahmadrashidlawyer' },
-          },
-          {
-            type: LinkType.AI_CHAT,
-            label: 'Tanya Lia — AI Undang-Undang',
-            subtitle: 'Jawapan segera, percuma',
-            url: 'https://app.tanyapeguam.com',
-            displayOrder: 4,
             metadata: { agentId: 'lia' },
           },
         ],
       },
     },
   });
-  console.log(`✅ Created profile: ${ahmadRashid.slug} (with 4 links)`);
+  console.log('✅ Created profile: adamluqman (8 links)');
 
   // ─────────────────────────────────────────────
-  // Profile 3: Siti Hasanah (minimal)
+  // Profile 2: Rizlan Ghazali
   // ─────────────────────────────────────────────
-  const sitiHasanah = await prisma.profile.create({
+  await prisma.profile.create({
     data: {
-      slug: 'sitihasanah',
-      name: 'Siti Hasanah binti Yusof',
-      title: 'Peguam Bela',
-      firm: 'SH Law',
-      firmFull: 'Siti Hasanah Law Firm',
-      monogram: 'SH',
-      location: 'Kota Bharu, Kelantan',
-      status: Status.BUSY,
-      practiceAreas: ['Hartanah', 'Wasiat'],
-      isVerified: false, // shows pending verification
-      bio: 'Peguam hartanah dan wasiat di Kelantan. Pengalaman 5 tahun.',
+      slug: 'rizlan',
+      name: 'Rizlan Ghazali',
+      title: 'Peguam Bela & Peguam Cara',
+      firm: 'R&A',
+      firmFull: 'Rizlan & Associates',
+      monogram: 'RG',
+      location: 'Shah Alam, Selangor',
+      status: Status.AVAILABLE,
+      practiceAreas: ['Jenayah', 'Sivil'],
+      isVerified: true,
+      bio: 'Peguam Bela & Peguam Cara di Shah Alam. Pakar dalam kes jenayah dan sivil.',
+      metaTitle: 'Rizlan Ghazali — Peguam Bela | TanyaPeguam',
+      metaDescription: 'Peguam Bela & Peguam Cara di Shah Alam. Hubungi melalui WhatsApp untuk konsultasi.',
       links: {
         create: [
           {
             type: LinkType.WHATSAPP,
             label: 'WhatsApp',
-            subtitle: 'Mesej sahaja, bukan call',
-            url: 'https://wa.me/60145678901',
+            subtitle: 'Hubungi terus',
+            url: 'https://wa.me/60145105382',
             displayOrder: 1,
-            metadata: { phone: '+60145678901' },
+            metadata: { phone: '+60145105382' },
           },
           {
-            type: LinkType.EMAIL,
-            label: 'Email',
-            subtitle: 'siti@shlaw.my',
-            url: 'mailto:siti@shlaw.my',
+            type: LinkType.PHONE,
+            label: 'Telefon',
+            subtitle: '014-510 5382',
+            url: 'tel:+60145105382',
             displayOrder: 2,
+            metadata: { phone: '+60145105382' },
+          },
+          {
+            type: LinkType.LINKEDIN,
+            label: 'LinkedIn',
+            subtitle: 'Siaran terkini',
+            url: 'https://linkedin.com/in/rizlanghazali',
+            displayOrder: 3,
+            metadata: {
+              handle: 'rizlanghazali',
+              manualPosts: [
+                {
+                  content: 'Ramai yang tidak tahu — anda ada hak untuk diam semasa ditahan polis. Gunakan hak itu dengan bijak.',
+                  postedAt: '1 minggu lalu',
+                  reactions: { likes: 203, comments: 34 },
+                },
+              ],
+            },
+          },
+          {
+            type: LinkType.FACEBOOK,
+            label: 'Facebook',
+            subtitle: 'Rizlan & Associates',
+            url: 'https://facebook.com/rizlanassociates',
+            displayOrder: 4,
+            metadata: {
+              pageId: 'rizlanassociates',
+              stats: { likes: 3800, followers: 4200, rating: 4.9 },
+            },
+          },
+          {
+            type: LinkType.AI_CHAT,
+            label: 'Tanya Lia — AI Undang-Undang',
+            subtitle: 'Jawapan segera, percuma',
+            url: 'https://app.tanyapeguam.com',
+            displayOrder: 5,
+            metadata: { agentId: 'lia' },
           },
         ],
       },
     },
   });
-  console.log(`✅ Created profile: ${sitiHasanah.slug} (with 2 links)`);
+  console.log('✅ Created profile: rizlan (5 links)');
+
+  // ─────────────────────────────────────────────
+  // Profile 3: Muhammad Arif Azmi
+  // ─────────────────────────────────────────────
+  await prisma.profile.create({
+    data: {
+      slug: 'arifazmi',
+      name: 'Muhammad Arif Azmi',
+      title: 'Peguam Bela & Peguam Cara',
+      firm: 'Arif Azmi & Co',
+      firmFull: 'Arif Azmi & Co',
+      monogram: 'AA',
+      location: 'Petaling Jaya, Selangor',
+      status: Status.AVAILABLE,
+      practiceAreas: ['Hartanah', 'Wasiat'],
+      isVerified: true,
+      bio: 'Peguam Bela & Peguam Cara di Petaling Jaya. Pakar dalam kes hartanah dan wasiat.',
+      metaTitle: 'Muhammad Arif Azmi — Peguam Bela | TanyaPeguam',
+      metaDescription: 'Peguam Bela & Peguam Cara di PJ. Pakar hartanah & wasiat. Hubungi melalui WhatsApp.',
+      links: {
+        create: [
+          {
+            type: LinkType.WHATSAPP,
+            label: 'WhatsApp',
+            subtitle: 'Hubungi terus',
+            url: 'https://wa.me/60165577745',
+            displayOrder: 1,
+            metadata: { phone: '+60165577745' },
+          },
+          {
+            type: LinkType.PHONE,
+            label: 'Telefon',
+            subtitle: '016-557 7745',
+            url: 'tel:+60165577745',
+            displayOrder: 2,
+            metadata: { phone: '+60165577745' },
+          },
+          {
+            type: LinkType.LINKEDIN,
+            label: 'LinkedIn',
+            subtitle: 'Siaran terkini',
+            url: 'https://linkedin.com/in/muharifazmi',
+            displayOrder: 3,
+            metadata: {
+              handle: 'muharifazmi',
+              manualPosts: [
+                {
+                  content: 'Nak beli rumah? Pastikan anda faham perbezaan antara SPA dan LOO sebelum tandatangan apa-apa dokumen.',
+                  postedAt: '4 hari lalu',
+                  reactions: { likes: 156, comments: 28 },
+                },
+              ],
+            },
+          },
+          {
+            type: LinkType.FACEBOOK,
+            label: 'Facebook',
+            subtitle: 'Arif Azmi & Co',
+            url: 'https://facebook.com/arifazmilaw',
+            displayOrder: 4,
+            metadata: {
+              pageId: 'arifazmilaw',
+              stats: { likes: 1600, followers: 1900, rating: 4.7 },
+            },
+          },
+          {
+            type: LinkType.AI_CHAT,
+            label: 'Tanya Lia — AI Undang-Undang',
+            subtitle: 'Jawapan segera, percuma',
+            url: 'https://app.tanyapeguam.com',
+            displayOrder: 5,
+            metadata: { agentId: 'lia' },
+          },
+        ],
+      },
+    },
+  });
+  console.log('✅ Created profile: arifazmi (5 links)');
 
   console.log('\n🎉 Seeding complete!\n');
-  console.log('Test URLs:');
-  console.log('   http://localhost:3000/datukwanazmir');
-  console.log('   http://localhost:3000/ahmadrashid');
-  console.log('   http://localhost:3000/sitihasanah');
+  console.log('Live URLs:');
+  console.log('   http://localhost:3000/adamluqman');
+  console.log('   http://localhost:3000/rizlan');
+  console.log('   http://localhost:3000/arifazmi');
 }
 
 main()

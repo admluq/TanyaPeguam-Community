@@ -6,19 +6,36 @@ interface ProfileHeaderProps {
 }
 
 export function ProfileHeader({ profile }: ProfileHeaderProps) {
+  const monogram = profile.monogram ?? profile.name.slice(0, 2).toUpperCase();
+
   return (
     <header className="text-center animate-fade-in">
-      {/* Monogram avatar circle */}
+      {/* Avatar with spinning gradient ring */}
       <div className="relative inline-block mb-6">
-        <div className="w-24 h-24 rounded-full border-2 border-gold/60 flex items-center justify-center bg-ink-300 relative">
-          <span className="font-display italic text-gold text-3xl">
-            {profile.monogram ?? profile.name.slice(0, 2).toUpperCase()}
-          </span>
-          {/* Subtle inner ring */}
-          <div className="absolute inset-1 rounded-full border border-gold/20" />
-        </div>
-        {/* Glow */}
+        {/* Gold glow behind */}
         <div className="absolute inset-0 rounded-full bg-gold/20 blur-2xl -z-10 animate-gold-shimmer" />
+
+        {/* Spinning conic ring */}
+        <div
+          className="w-24 h-24 rounded-full animate-spin-slow p-[2px]"
+          style={{
+            background: 'conic-gradient(from 0deg, #c9a961, #f5edd5, #dec486, #7c6128, #c9a961)',
+          }}
+        >
+          {/* Static inner avatar */}
+          <div className="w-full h-full rounded-full bg-ink-300 flex items-center justify-center">
+            <span className="font-display italic text-gold text-3xl">{monogram}</span>
+          </div>
+        </div>
+
+        {/* Verified checkmark badge */}
+        {profile.isVerified && (
+          <div className="absolute bottom-0.5 right-0.5 w-6 h-6 rounded-full bg-gold border-2 border-ink-300 flex items-center justify-center">
+            <svg className="w-3 h-3" fill="white" viewBox="0 0 24 24">
+              <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+            </svg>
+          </div>
+        )}
       </div>
 
       {/* Name */}
@@ -37,46 +54,37 @@ export function ProfileHeader({ profile }: ProfileHeaderProps) {
         )}
       </p>
 
-      {/* Badges row */}
-      <div className="flex flex-wrap justify-center gap-2 mb-6">
-        {/* Location */}
+      {/* Badges */}
+      <div className="flex flex-wrap justify-center gap-2 mb-5">
         <BadgePill>{profile.location}</BadgePill>
-
-        {/* Status */}
         <BadgePill>
           <span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(profile.status)}`} />
           {getStatusLabel(profile.status)}
         </BadgePill>
-
-        {/* Practice areas */}
         {profile.practiceAreas.map((area) => (
           <BadgePill key={area}>{area}</BadgePill>
         ))}
       </div>
 
-      {/* Verification badge */}
+      {/* TP verified pill */}
       {profile.isVerified && (
-        <p className="inline-flex items-center gap-2 text-xs text-cream-muted">
-          <span className="inline-flex items-center justify-center w-5 h-5 rounded border border-gold/40 text-gold text-[10px] font-mono">
+        <a
+          href={process.env.NEXT_PUBLIC_SITE_URL ?? 'https://tanyapeguam.com'}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-gold/30 hover:border-gold/60 text-xs text-cream-muted hover:text-cream transition-all"
+        >
+          <span className="inline-flex items-center justify-center w-4 h-4 rounded border border-gold/50 text-gold text-[9px] font-mono">
             TP
           </span>
-          <span>
-            Profil Disahkan{' '}
-            <span className="mx-1 text-gold/40">·</span>{' '}
-            <a
-              href={process.env.NEXT_PUBLIC_SITE_URL}
-              className="text-gold hover:text-gold-300 transition-colors"
-            >
-              TanyaPeguam.com
-            </a>
-          </span>
-        </p>
+          Disahkan oleh TanyaPeguam.com
+          <span className="text-gold/40 text-[10px]">↗</span>
+        </a>
       )}
     </header>
   );
 }
 
-// ─── Badge pill (small tag) ─────────────────────────
 function BadgePill({ children }: { children: React.ReactNode }) {
   return (
     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-ink-50 bg-ink-200/50 text-cream-muted text-xs">
