@@ -2,10 +2,11 @@ import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
 import { prisma } from '@/lib/db';
 import { ProfileHeader } from '@/components/profile/profile-header';
+import { QuickActions } from '@/components/profile/quick-actions';
+import { LiaWidget } from '@/components/profile/lia-widget';
 import { LinkCard } from '@/components/profile/link-card';
 import { ProfileFooter } from '@/components/profile/profile-footer';
 
-// ─── Static params (SSG for known profiles) ─────────
 export async function generateStaticParams() {
   const profiles = await prisma.profile.findMany({
     where: { isActive: true },
@@ -14,7 +15,6 @@ export async function generateStaticParams() {
   return profiles.map((p) => ({ slug: p.slug }));
 }
 
-// ─── Dynamic metadata per profile ───────────────────
 export async function generateMetadata({
   params,
 }: {
@@ -22,15 +22,7 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const profile = await prisma.profile.findUnique({
     where: { slug: params.slug },
-    select: {
-      name: true,
-      title: true,
-      firm: true,
-      location: true,
-      bio: true,
-      metaTitle: true,
-      metaDescription: true,
-    },
+    select: { name: true, title: true, firm: true, location: true, bio: true, metaTitle: true, metaDescription: true },
   });
 
   if (!profile) return { title: 'Profil tidak dijumpai' };
@@ -49,7 +41,6 @@ export async function generateMetadata({
   };
 }
 
-// ─── Page component ─────────────────────────────────
 export default async function ProfilePage({
   params,
 }: {
@@ -67,27 +58,44 @@ export default async function ProfilePage({
 
   if (!profile) notFound();
 
+  const aiLink = profile.links.find((l) => l.type === 'AI_CHAT');
+  const waLink = profile.links.find((l) => l.type === 'WHATSAPP');
+  const socialLinks = profile.links.filter((l) => l.type !== 'AI_CHAT');
+
   return (
     <main className="relative min-h-screen overflow-x-hidden">
-      {/* Decorative gold halo behind avatar */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[500px] h-[500px] bg-gold-radial pointer-events-none opacity-50" />
 
-      <div className="relative max-w-md mx-auto px-5 py-12">
-        {/* Profile header */}
+      <div className="relative max-w-md mx-auto px-5 pt-12 pb-16">
         <ProfileHeader profile={profile} />
 
-        {/* Links list */}
-        <div className="mt-10 space-y-3 animate-slide-up" style={{ animationDelay: '200ms' }}>
-          {profile.links.map((link, i) => (
-            <LinkCard
-              key={link.id}
-              link={link}
-              animationDelay={`${300 + i * 60}ms`}
-            />
-          ))}
-        </div>
+        <QuickActions links={profile.links} lawyerName={profile.name} />
 
-        {/* Footer */}
+        {aiLink && (
+          <LiaWidget
+            lawyerName={profile.name}
+            practiceAreas={profile.practiceAreas}
+            whatsappUrl={waLink?.url ?? undefined}
+          />
+        )}
+
+        {socialLinks.length > 0 && (
+          <>
+            <p className="mt-8 mb-3 text-cream-muted text-[11px] uppercase tracking-[0.2em] text-center">
+              Ikuti &amp; Berhubung
+            </p>
+            <div className="space-y-3 animate-slide-up" style={{ animationDelay: '200ms' }}>
+              {socialLinks.map((link, i) => (
+                <LinkCard
+                  key={link.id}
+                  link={link}
+                  animationDelay={`${300 + i * 60}ms`}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
         <ProfileFooter />
       </div>
     </main>

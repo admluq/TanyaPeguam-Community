@@ -92,4 +92,25 @@
     pointer-events: none;
     mix-blend-mode: overlay;
   }
+
+  /* Lia chat bubbles */
+  .bubble-lia {
+    @apply bg-ink-100 border border-ink-50 text-cream text-sm px-4 py-2.5 rounded-2xl rounded-tl-sm max-w-[85%];
+  }
+
+  .bubble-user {
+    @apply bg-gold/15 border border-gold/20 text-cream text-sm px-4 py-2.5 rounded-2xl rounded-tr-sm max-w-[85%];
+  }
+
+  /* Thin scrollbar for chat */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #1a1a1f transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 4px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-ink-50 rounded;
+  }
 }
