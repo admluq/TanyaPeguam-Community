@@ -56,6 +56,8 @@ const config: Config = {
         'fade-in': 'fadeIn 0.6s ease-out',
         'slide-up': 'slideUp 0.5s ease-out',
         'gold-shimmer': 'goldShimmer 3s ease-in-out infinite',
+        'spin-slow': 'spin 8s linear infinite',
+        'bounce-dot': 'bounceDot 1.2s ease-in-out infinite',
       },
       keyframes: {
         fadeIn: {
@@ -69,6 +71,10 @@ const config: Config = {
         goldShimmer: {
           '0%, 100%': { opacity: '0.6' },
           '50%': { opacity: '1' },
+        },
+        bounceDot: {
+          '0%, 80%, 100%': { transform: 'translateY(0)' },
+          '40%': { transform: 'translateY(-4px)' },
         },
       },
     },

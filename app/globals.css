@@ -76,6 +76,11 @@
   .border-luxe {
     @apply border border-ink-50 hover:border-gold/40 transition-colors;
   }
+
+  /* Lia chat bubble */
+  .bubble-lia {
+    @apply bg-ink-200 border border-ink-50 rounded-xl rounded-tl-sm px-3 py-2 text-xs text-cream-muted leading-relaxed max-w-[85%];
+  }
 }
 
 @layer utilities {
@@ -91,5 +96,21 @@
     opacity: 0.03;
     pointer-events: none;
     mix-blend-mode: overlay;
+  }
+
+  /* Scrollbar for chat widget */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #1a1a1f transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 3px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #1a1a1f;
+    border-radius: 3px;
   }
 }
