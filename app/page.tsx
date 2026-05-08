@@ -83,13 +83,12 @@ export default async function HomePage() {
             </span>
           </Link>
           <div className="flex items-center gap-3">
-            <Link href="/admluq" className="text-lg hidden sm:block transition-colors" style={{ color: 'rgba(255,255,255,0.35)' }}>
-              Untuk Peguam
-            </Link>
-            <Link href="https://app.tanyapeguam.com"
+            <Link
+              href="/login"
               className="text-lg font-semibold px-5 py-2.5 rounded-lg transition-all hover:opacity-90"
-              style={{ background: 'rgba(124,58,237,0.15)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.25)' }}>
-              Tanya Donna →
+              style={{ background: 'rgba(124,58,237,0.15)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.25)' }}
+            >
+              Untuk Peguam
             </Link>
           </div>
         </div>
@@ -105,7 +104,7 @@ export default async function HomePage() {
             <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-lg font-medium mb-7"
               style={{ background: 'rgba(124,58,237,0.1)', border: '1px solid rgba(124,58,237,0.22)', color: '#a78bfa' }}>
               <span className="w-2 h-2 rounded-full bg-violet-400 animate-pulse" />
-              Donna AI tersedia sekarang
+              Cuba Donna AI sekarang!
             </div>
 
             <h1 className="font-display leading-[1.08] mb-5"
