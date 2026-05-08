@@ -239,6 +239,7 @@ Plan:
 - **Architecture questions**: see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
 
 ---
+test adam
 
 ## 📄 License
 
