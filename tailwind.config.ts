@@ -9,66 +9,66 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        // Distinctive serif for headings — refined, lawyerly
         display: ['var(--font-display)', 'Georgia', 'serif'],
-        // Sans for body — clean, readable
         sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
-        // Mono for technical bits
-        mono: ['ui-monospace', 'monospace'],
       },
       colors: {
-        // Brand palette — refined dark luxury with gold accents
-        // Match the artifact aesthetic
-        ink: {
-          DEFAULT: '#0a0a0c', // background
-          50: '#1a1a1f',
-          100: '#16161a',
-          200: '#121215',
-          300: '#0e0e11',
-          400: '#0a0a0c',
-          500: '#08080a',
+        bg: {
+          DEFAULT: '#0d0e17',
+          2: '#12131f',
+          3: '#171827',
+          4: '#1d1e2e',
+        },
+        border: {
+          DEFAULT: 'rgba(255,255,255,0.07)',
+          hover: 'rgba(255,255,255,0.13)',
+          gold: 'rgba(212,168,83,0.35)',
         },
         gold: {
-          DEFAULT: '#c9a961', // primary accent
-          50: '#f5edd5',
-          100: '#ead9a8',
-          200: '#dec486',
-          300: '#d2af65',
-          400: '#c9a961',
-          500: '#b89548',
-          600: '#9a7a35',
-          700: '#7c6128',
+          DEFAULT: '#d4a853',
+          light: '#e8c07a',
+          dim: 'rgba(212,168,83,0.15)',
         },
-        cream: {
-          DEFAULT: '#f5e6c8',
-          muted: '#a89a82',
+        text: {
+          primary: '#eee8dc',
+          secondary: '#9490a0',
+          muted: '#5e5a6e',
         },
-        // Functional
-        success: '#10b981',
-        warning: '#f59e0b',
-        danger: '#ef4444',
+        lia: {
+          DEFAULT: '#6366f1',
+          light: '#818cf8',
+          dim: 'rgba(99,102,241,0.12)',
+          border: 'rgba(99,102,241,0.25)',
+        },
+        status: {
+          available: '#34d399',
+          busy: '#fb923c',
+        },
       },
       backgroundImage: {
-        'noise': "url(\"data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E\")",
-        'gold-radial': 'radial-gradient(circle at center, rgba(201, 169, 97, 0.15), transparent 70%)',
+        'hero-glow': 'radial-gradient(ellipse 80% 50% at 50% -10%, rgba(99,102,241,0.12), transparent)',
+        'gold-glow': 'radial-gradient(ellipse 60% 40% at 50% 100%, rgba(212,168,83,0.08), transparent)',
+        'card-shine': 'linear-gradient(135deg, rgba(255,255,255,0.03) 0%, transparent 60%)',
+      },
+      boxShadow: {
+        'card': '0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.05)',
+        'card-hover': '0 4px 20px rgba(0,0,0,0.5), 0 0 0 1px rgba(212,168,83,0.2)',
+        'lia': '0 0 40px rgba(99,102,241,0.15)',
+        'gold': '0 0 30px rgba(212,168,83,0.12)',
       },
       animation: {
-        'fade-in': 'fadeIn 0.6s ease-out',
-        'slide-up': 'slideUp 0.5s ease-out',
-        'gold-shimmer': 'goldShimmer 3s ease-in-out infinite',
+        'fade-up': 'fadeUp 0.5s ease-out',
+        'pulse-slow': 'pulse 3s ease-in-out infinite',
+        'blink': 'blink 1.2s step-end infinite',
       },
       keyframes: {
-        fadeIn: {
-          '0%': { opacity: '0' },
-          '100%': { opacity: '1' },
-        },
-        slideUp: {
-          '0%': { opacity: '0', transform: 'translateY(20px)' },
+        fadeUp: {
+          '0%': { opacity: '0', transform: 'translateY(16px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
         },
-        goldShimmer: {
-          '0%, 100%': { opacity: '0.6' },
-          '50%': { opacity: '1' },
+        blink: {
+          '0%, 100%': { opacity: '1' },
+          '50%': { opacity: '0' },
         },
       },
     },

@@ -46,7 +46,7 @@ export function LinkCard({ link, animationDelay }: LinkCardProps) {
       style={{ animationDelay }}
     >
       <Wrapper
-        {...(wrapperProps as never)}
+        {...(wrapperProps as Record<string, unknown>)}
         className="flex items-center gap-4 p-4 cursor-pointer"
       >
         {/* Icon */}

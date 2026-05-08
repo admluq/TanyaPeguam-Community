@@ -1,9 +1,7 @@
 // =====================================================
 // tptree — Prisma Schema
 // =====================================================
-// Multi-tenant lawyer profile pages
-// Each Profile has many Links (social, contact, web)
-// Each Link can have CachedPreview for live data
+// Multi-tenant lawyer profile pages + Donna AI intake
 // =====================================================
 
 generator client {
@@ -16,40 +14,106 @@ datasource db {
 }
 
 // ─────────────────────────────────────────────────────
-// Profile — the lawyer's profile page
+// Auth — NextAuth v5 required models
+// ─────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?   // nullable: only set for email/password auth
+  role          UserRole  @default(CLIENT)
+
+  accounts      Account[]
+  sessions      Session[]
+
+  profile       Profile?       @relation(fields: [profileId], references: [id])
+  profileId     String?        @unique
+
+  donnaConfig   DonnaConfig?
+  donnaBridges  DonnaBridge[]
+  donnaInquiries DonnaInquiry[]
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  CLIENT
+}
+
+// ─────────────────────────────────────────────────────
+// Profile — the lawyer's public profile page
 // URL: tanyapeguam.com/[slug]
 // ─────────────────────────────────────────────────────
 model Profile {
   id        String   @id @default(cuid())
-  slug      String   @unique // URL slug, e.g. "datukwanazmir"
+  slug      String   @unique
   isActive  Boolean  @default(true)
-  isVerified Boolean @default(false) // shows "Profil Disahkan" badge
+  isVerified Boolean @default(false)
 
-  // Identity
-  name      String   // "Datuk Wan Azmir"
-  title     String   // "Peguam Kanan"
-  firm      String?  // "HWAM" — short name for header
-  firmFull  String?  // "Hafarizam Wan & Aisha Mubarak" — full name
-  monogram  String?  // "WA" — for avatar circle
+  name      String
+  title     String
+  firm      String?
+  firmFull  String?
+  monogram  String?
 
-  // Location & status
-  location  String   // "Kuala Lumpur"
+  location  String
   status    Status   @default(AVAILABLE)
 
-  // Practice areas (badges)
-  practiceAreas String[] // ["Korporat & Sivil", "Litigasi"]
+  practiceAreas String[]
 
-  // Bio (optional, for SEO meta description)
   bio       String?  @db.Text
 
-  // SEO
   metaTitle       String?
   metaDescription String?
 
-  // Relations
   links     Link[]
+  user      User?
 
-  // Timestamps
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -66,32 +130,21 @@ enum Status {
 
 // ─────────────────────────────────────────────────────
 // Link — individual link card on profile
-// E.g. WhatsApp, LinkedIn, TikTok, Website
 // ─────────────────────────────────────────────────────
 model Link {
   id           String   @id @default(cuid())
   profileId    String
   profile      Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
-  type         LinkType // determines icon, color, expand behavior
-  label        String   // "Hubungi Kami", "LinkedIn"
-  subtitle     String?  // "WhatsApp · Lokasi · Ulasan"
-  url          String?  // optional — some links don't go anywhere (e.g. AI chat)
+  type         LinkType
+  label        String
+  subtitle     String?
+  url          String?
   displayOrder Int      @default(0)
   isActive     Boolean  @default(true)
 
-  // Custom data per link type (JSON)
-  // - WHATSAPP: { phone, prefilledMessage }
-  // - WEBSITE: { domain, screenshotUrl }
-  // - LINKEDIN: { handle, manualPosts: [...] }
-  // - TIKTOK: { handle, videoIds: [...] }
-  // - FACEBOOK: { pageId, stats: { likes, followers, rating } }
-  // - INSTAGRAM: { handle }
-  // - TWITTER: { handle }
-  // - AI_CHAT: { agentId, modelName }
   metadata     Json?
 
-  // Cached fetched data (refreshed via cron)
   cachedPreview CachedPreview?
 
   createdAt    DateTime @default(now())
@@ -118,21 +171,14 @@ enum LinkType {
 
 // ─────────────────────────────────────────────────────
 // CachedPreview — server-side cache for live previews
-// Refreshed via cron job (e.g. every 24h)
 // ─────────────────────────────────────────────────────
 model CachedPreview {
   id          String   @id @default(cuid())
   linkId      String   @unique
   link        Link     @relation(fields: [linkId], references: [id], onDelete: Cascade)
 
-  // Preview data (varies by link type)
-  // - WEBSITE: { ogTitle, ogDescription, ogImage, screenshotUrl }
-  // - LINKEDIN: { posts: [{ content, postedAt, url }] }
-  // - TIKTOK: { videos: [{ id, thumbnail, caption, views }] }
-  // - FACEBOOK: { likes, followers, rating, latestPost }
   data        Json
 
-  // Cache control
   fetchedAt   DateTime @default(now())
   expiresAt   DateTime
   fetchStatus FetchStatus @default(SUCCESS)
@@ -154,9 +200,8 @@ model AnalyticsEvent {
   id        String   @id @default(cuid())
   profileId String
   linkId    String?
-  eventType String   // "page_view", "link_click", "expand"
+  eventType String
 
-  // Visitor metadata (anonymized)
   country   String?
   device    String?
   referrer  String?
@@ -165,4 +210,119 @@ model AnalyticsEvent {
 
   @@index([profileId, createdAt])
   @@index([linkId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────
+// DonnaConfig — lawyer's Donna configuration
+// Populated via 5-step setup wizard
+// ─────────────────────────────────────────────────────
+model DonnaConfig {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Step 1: Practice areas
+  practiceAreas String[]
+
+  // Step 2: Jurisdiction
+  jurisdiction String?
+  barCouncil   String? // "WP" | "Selangor" | "Sabah" | "Sarawak"
+
+  // Step 3: Availability & fees
+  workingHours     Json?   // { mon: { open, close, active }, ... }
+  firstConsultMode String? // "free" | "paid"
+  consultFee       Float?
+  urgencyFee       Float?
+
+  // Step 4: Triage rules
+  sensitivityLevel Int      @default(5) // 1–10
+  deflectPatterns  String[]
+
+  // Step 5: Email & conversion tiers
+  emailTo       String?
+  lowTierLabel  String @default("Konsultasi (RM50)")
+  medTierLabel  String @default("Web Call")
+  highTierLabel String @default("Temujanji")
+
+  isComplete Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────
+// DonnaBridge — context links for FB Group handoffs
+// ─────────────────────────────────────────────────────
+model DonnaBridge {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  refCode      String  @unique // nanoid(8)
+  source       String? // "Facebook Group", "WhatsApp Group"
+  question     String  @db.Text
+  practiceArea String?
+  keyFacts     String? @db.Text
+
+  clickCount  Int       @default(0)
+  lastClickAt DateTime?
+
+  expiresAt DateTime?
+  isActive  Boolean   @default(true)
+
+  inquiries DonnaInquiry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([refCode])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────
+// DonnaInquiry — individual intake record
+// ─────────────────────────────────────────────────────
+model DonnaInquiry {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  bridgeId String?
+  bridge   DonnaBridge? @relation(fields: [bridgeId], references: [id])
+
+  // Caller info
+  callerName  String?
+  callerPhone String?
+  callerEmail String?
+
+  // Issue summary
+  issueSummary String  @db.Text
+  practiceArea String?
+
+  // Triage
+  concreteScore  Int    @default(5)  // 0–10
+  urgencyTag     String @default("STANDARD") // STANDARD | MEDIUM | HIGH | CRITICAL
+  conversionTier String @default("MED")      // LOW | MED | HIGH
+
+  status InquiryStatus @default(CAPTURED)
+
+  emailSentAt DateTime?
+
+  // Magic link tokens for silent accept/reject
+  acceptToken String? @unique
+  rejectToken String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+enum InquiryStatus {
+  DEFLECTED
+  CAPTURED
+  EMAILED
+  ACCEPTED
+  REJECTED
+  EXPIRED
 }
