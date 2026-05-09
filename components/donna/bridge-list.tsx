@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Copy, Check, MousePointer, Calendar, ChevronDown } from 'lucide-react';
+import { Copy, Check, MousePointer, Calendar, ChevronDown, Edit2, Trash2, Power, PowerOff } from 'lucide-react';
 
 type Bridge = {
   id: string;
@@ -16,6 +16,37 @@ type Bridge = {
 };
 
 export function BridgeList({ bridges }: { bridges: Bridge[] }) {
+  const [editingBridge, setEditingBridge] = useState<string | null>(null);
+
+  async function toggleBridgeStatus(bridgeId: string, isActive: boolean) {
+    try {
+      const res = await fetch(`/api/donna/bridge/${bridgeId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive }),
+      });
+      if (res.ok) {
+        window.location.reload();
+      }
+    } catch (error) {
+      console.error('Failed to toggle bridge status:', error);
+    }
+  }
+
+  async function deleteBridge(bridgeId: string) {
+    if (confirm('Adakah anda pasti ingin memadam bridge ini?')) {
+      try {
+        const res = await fetch(`/api/donna/bridge/${bridgeId}`, {
+          method: 'DELETE',
+        });
+        if (res.ok) {
+          window.location.reload();
+        }
+      } catch (error) {
+        console.error('Failed to delete bridge:', error);
+      }
+    }
+  }
   if (bridges.length === 0) {
     return (
       <div className="glass-card rounded-2xl p-8 text-center">
@@ -26,12 +57,25 @@ export function BridgeList({ bridges }: { bridges: Bridge[] }) {
 
   return (
     <div className="space-y-3">
-      {bridges.map((b) => <BridgeCard key={b.id} bridge={b} />)}
+      {bridges.map((b) => (
+        <BridgeCard 
+          key={b.id} 
+          bridge={b} 
+          onToggleStatus={toggleBridgeStatus}
+          onDelete={deleteBridge}
+          onEdit={setEditingBridge}
+        />
+      ))}
     </div>
   );
 }
 
-function BridgeCard({ bridge }: { bridge: Bridge }) {
+function BridgeCard({ bridge, onToggleStatus, onDelete, onEdit }: { 
+  bridge: Bridge; 
+  onToggleStatus: (id: string, isActive: boolean) => void;
+  onDelete: (id: string) => void;
+  onEdit: (id: string | null) => void;
+}) {
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://tanyapeguam.com';
@@ -57,13 +101,34 @@ function BridgeCard({ bridge }: { bridge: Bridge }) {
           </div>
           <p className="text-sm text-text-primary font-medium truncate">{bridge.source ?? 'Bridge'} · #{bridge.refCode}</p>
         </div>
-        <button
-          onClick={copy}
-          className="flex items-center gap-1.5 text-xs text-lia-light hover:text-lia transition-colors flex-shrink-0 bg-lia-dim border border-lia-border px-2.5 py-1.5 rounded-lg"
-        >
-          {copied ? <Check size={12} /> : <Copy size={12} />}
-          {copied ? 'Disalin' : 'Salin'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onToggleStatus(bridge.id, !bridge.isActive)}
+            className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded-lg transition-colors ${
+              bridge.isActive 
+                ? 'bg-[rgba(251,146,60,0.12)] text-[#fb923c] hover:bg-[rgba(251,146,60,0.2)]' 
+                : 'bg-[rgba(52,211,153,0.12)] text-[#34d399] hover:bg-[rgba(52,211,153,0.2)]'
+            }`}
+            title={bridge.isActive ? 'Deactivate bridge' : 'Activate bridge'}
+          >
+            {bridge.isActive ? <PowerOff size={12} /> : <Power size={12} />}
+            {bridge.isActive ? 'Off' : 'On'}
+          </button>
+          <button
+            onClick={() => onDelete(bridge.id)}
+            className="flex items-center gap-1 text-xs bg-[rgba(239,68,68,0.12)] text-[#f87171] hover:bg-[rgba(239,68,68,0.2)] px-2 py-1.5 rounded-lg transition-colors"
+            title="Delete bridge"
+          >
+            <Trash2 size={12} />
+          </button>
+          <button
+            onClick={copy}
+            className="flex items-center gap-1.5 text-xs text-lia-light hover:text-lia transition-colors flex-shrink-0 bg-lia-dim border border-lia-border px-2.5 py-1.5 rounded-lg"
+          >
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+            {copied ? 'Disalin' : 'Salin'}
+          </button>
+        </div>
       </div>
 
       <div className="flex items-center gap-4 text-xs text-text-muted">

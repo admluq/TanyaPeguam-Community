@@ -2,6 +2,7 @@
 
 import { signIn } from 'next-auth/react';
 import { useSearchParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Suspense, useState } from 'react';
 import { Loader2, AlertCircle } from 'lucide-react';
 
@@ -170,12 +171,25 @@ function LoginForm() {
                 )}
               </button>
 
-              <p className="text-center text-text-muted text-xs">
-                Belum ada akaun?{' '}
-                <a href="/register" className="text-gold hover:text-gold-light transition-colors font-medium">
-                  Daftar
-                </a>
-              </p>
+              <div className="space-y-3">
+                <p className="text-center text-text-muted text-xs">
+                  Belum ada akaun?{' '}
+                  <a href="/register" className="text-gold hover:text-gold-light transition-colors font-medium">
+                    Daftar
+                  </a>
+                </p>
+                <div className="flex items-center gap-2 text-center">
+                  <div className="flex-1 h-px bg-border" />
+                  <span className="text-text-muted text-xs">atau</span>
+                  <div className="flex-1 h-px bg-border" />
+                </div>
+                <Link
+                  href="/"
+                  className="w-full flex items-center justify-center gap-2 bg-bg-3 hover:bg-bg-2 text-text-primary font-medium py-2.5 px-4 rounded-xl transition-all duration-150 border border-border"
+                >
+                  Kembali ke Laman Utama
+                </Link>
+              </div>
             </form>
           )}
 

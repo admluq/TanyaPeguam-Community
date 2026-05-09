@@ -126,18 +126,18 @@ export function BridgeCreator({ practiceAreas }: { practiceAreas: string[] }) {
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-text-secondary mb-1.5">Soalan / Sitrasi Asal</label>
+        <label className="block text-xs font-medium text-text-secondary mb-1.5">Konteks Perbualan</label>
         <textarea
           value={form.question}
           onChange={(e) => update('question', e.target.value)}
           rows={4}
-          placeholder="Tampal soalan dari FB Group di sini..."
+          placeholder="Tampal Konteks Perbualan disini"
           className="w-full bg-bg-3 border border-border rounded-xl px-4 py-3 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-lia transition-colors resize-none"
         />
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-text-secondary mb-1.5">Kawasan Amalan</label>
+        <label className="block text-xs font-medium text-text-secondary mb-1.5">Bidang Amalan</label>
         <select
           value={form.practiceArea}
           onChange={(e) => update('practiceArea', e.target.value)}
@@ -149,12 +149,12 @@ export function BridgeCreator({ practiceAreas }: { practiceAreas: string[] }) {
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-text-secondary mb-1.5">Fakta Kunci (Pilihan)</label>
+        <label className="block text-xs font-medium text-text-secondary mb-1.5">Konteks Pengetahuan Undang-Undang</label>
         <textarea
           value={form.keyFacts}
           onChange={(e) => update('keyFacts', e.target.value)}
           rows={2}
-          placeholder="Fakta penting yang perlu Donna tahu lebih awal..."
+          placeholder="Label as Konteks Undang-Undang yang Anda Nak Masukkan"
           className="w-full bg-bg-3 border border-border rounded-xl px-4 py-3 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-lia transition-colors resize-none"
         />
       </div>

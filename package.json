@@ -12,7 +12,9 @@
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
-    "db:reset": "prisma migrate reset"
+    "db:reset": "prisma migrate reset",
+    "db:remove-duplicate": "tsx scripts/remove-duplicate-profile.ts",
+    "db:delete-profile": "tsx scripts/delete-specific-profile.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

@@ -7,7 +7,7 @@ import { Check, ChevronRight, ChevronLeft, Loader2, Plus, X } from 'lucide-react
 const PRACTICE_AREAS = [
   'Defamasi & Reputasi',
   'Probet & Harta Pusaka',
-  'Harta Tanah',
+  'Hartanah',
   'Pekerjaan & Buruh',
   'Jenayah',
   'Keluarga & Perkahwinan',

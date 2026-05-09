@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
     update: {
       practiceAreas: body.practiceAreas ?? [],
       jurisdiction: body.jurisdiction,
-      barCouncil: body.barCouncil,
+      barCouncil: Array.isArray(body.barCouncil) ? body.barCouncil[0] : body.barCouncil,
       workingHours: body.hoursPreset !== undefined ? body.hoursPreset : undefined,
       firstConsultMode: body.firstConsultMode,
       consultFee: body.consultFee ? parseFloat(body.consultFee) : null,
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
       userId,
       practiceAreas: body.practiceAreas ?? [],
       jurisdiction: body.jurisdiction,
-      barCouncil: body.barCouncil,
+      barCouncil: Array.isArray(body.barCouncil) ? body.barCouncil[0] : body.barCouncil,
       firstConsultMode: body.firstConsultMode,
       consultFee: body.consultFee ? parseFloat(body.consultFee) : null,
       urgencyFee: body.urgencyFee ? parseFloat(body.urgencyFee) : null,

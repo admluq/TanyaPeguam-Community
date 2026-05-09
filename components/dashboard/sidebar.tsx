@@ -8,11 +8,13 @@ import {
   Wand2,
   Link2,
   FileText,
+  User,
   LogOut,
   ChevronRight,
 } from 'lucide-react';
 
 const NAV = [
+  { href: '/dashboard/profile', label: 'Profil Peguam', icon: User },
   { href: '/dashboard', label: 'Gambaran Keseluruhan', icon: LayoutDashboard, exact: true },
   { href: '/dashboard/donna/setup', label: 'Tetapan Donna', icon: Wand2 },
   { href: '/dashboard/donna/bridge', label: 'Bridge Links', icon: Link2 },

@@ -122,11 +122,43 @@ export default async function HomePage() {
               </span>
             </h1>
 
-            <p className="text-base leading-relaxed mb-10 max-w-md" style={{ color: 'rgba(255,255,255,0.4)' }}>
+            <p className="text-base leading-relaxed mb-6 max-w-md" style={{ color: 'rgba(255,255,255,0.4)' }}>
               Kad perniagaan digital interaktif untuk peguam Malaysia —
               satu platform profesional untuk konsultasi, rujukan, dan
               khidmat undang-undang anda.
             </p>
+
+            <div className="flex flex-col sm:flex-row gap-4 mb-8">
+              <Link
+                href="/login"
+                className="inline-flex items-center gap-2.5 px-6 py-3.5 rounded-xl font-semibold text-base transition-all hover:opacity-90 group"
+                style={{ 
+                  background: 'linear-gradient(135deg, #7c3aed, #8b5cf6)', 
+                  color: '#ffffff',
+                  boxShadow: '0 0 32px rgba(124,58,237,0.25), 0 0 64px rgba(124,58,237,0.1)',
+                  border: '1px solid rgba(124,58,237,0.25)'
+                }}
+              >
+                <span>Mula Sekarang</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="transition-transform group-hover:translate-x-0.5">
+                  <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </Link>
+              <Link
+                href="#peguam"
+                className="inline-flex items-center gap-2.5 px-6 py-3.5 rounded-xl font-semibold text-base transition-all hover:opacity-90"
+                style={{ 
+                  background: 'rgba(255,255,255,0.03)', 
+                  color: '#a78bfa',
+                  border: '1px solid rgba(124,58,237,0.25)'
+                }}
+              >
+                <span>Cari Peguam</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </Link>
+            </div>
 
             <div className="flex items-center gap-8">
               {STATS.map((s, i) => (
