@@ -1,0 +1,7040 @@
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::activity_facts::{ActivityFacts, WeeklyTotals};
+use crate::analytics;
+use crate::bearer::{BearerToken, BEARER_TOKEN_TTL};
+use crate::client_adapters::{detect_clients, ensure_rtk_integrations, rtk_integration_status};
+use crate::insights::generate_daily_insights;
+use crate::models::{
+    ActivityEvent, BootstrapProgress, ClaudeAccountProfile, ClaudeCodeProject, ClientStatus,
+    DailyInsight, DailySavingsPoint, DashboardState, HeadroomLearnPrereqStatus,
+    HeadroomLearnStatus, HourlySavingsPoint, LaunchExperience, RtkRuntimeStatus, RuntimeStatus,
+    RuntimeUpgradeFailure, RuntimeUpgradeProgress, TransformationFeedEvent, UpgradeFailurePhase,
+    UsageEvent,
+};
+use crate::pricing;
+use crate::storage::{app_data_dir, config_file, ensure_data_dirs, telemetry_file};
+use crate::tool_manager::{
+    BootstrapStepUpdate, HeadroomRelease, ManagedRuntime, RtkGainSummary, RuntimeMaintenanceKind,
+    ToolManager,
+};
+
+/// After this many consecutive failed auto-attempts at the same app version,
+/// we stop auto-retrying and surface a persistent banner with a Retry button.
+pub const MAX_UPGRADE_AUTO_RETRIES: u32 = 2;
+
+/// Absolute maximum time we'll wait for the new proxy to come up during
+/// boot validation, regardless of observed activity. Bounded so an
+/// indefinitely-hung process is still detected eventually. Adaptive stall
+/// detection (below) normally fires long before this.
+pub const RUNTIME_UPGRADE_BOOT_MAX_SECS: u64 = 600;
+
+/// Once this much wall-time has elapsed without /livez success, start
+/// checking the proxy log's mtime (and the HF cache size) for progress.
+/// Before this, we stay quiet — most fast boots finish well under this
+/// threshold.
+pub const RUNTIME_UPGRADE_STALL_GRACE_SECS: u64 = 60;
+
+/// If neither the proxy log nor the HF cache has grown in this long
+/// (AND we're past the grace period), the proxy is considered stalled
+/// and we roll back. Bumped from 45s → 90s after a real first-run upgrade
+/// failed: the python process printed its banner, then went silent for
+/// ~50s while loading multi-GB ONNX models from the freshly-downloaded
+/// HF cache. The log was idle but the proxy was making progress.
+pub const RUNTIME_UPGRADE_STALL_SILENCE_SECS: u64 = 90;
+
+enum RuntimeMaintenancePlan {
+    Upgrade(HeadroomRelease),
+    RequirementsRepair,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct PendingMilestones {
+    pub token: Vec<u64>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ActivityObservation {
+    #[allow(dead_code)] // read by tests; production callers discard observations
+    pub fresh: Vec<ActivityEvent>,
+}
+
+/// Emit the runtime upgrade progress event on the given AppHandle.
+pub fn emit_runtime_upgrade_progress(app: &tauri::AppHandle, state: &AppState) {
+    use tauri::Emitter;
+    let _ = app.emit("runtime_upgrade_progress", state.runtime_upgrade_progress());
+}
+
+/// Escape hatch: set `HEADROOM_SKIP_RUNTIME_UPGRADE=1` to boot past a
+/// persistently-failing upgrade without editing disk state.
+pub fn runtime_upgrade_disabled_by_env() -> bool {
+    matches!(
+        std::env::var("HEADROOM_SKIP_RUNTIME_UPGRADE")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+/// One-shot probe of the new proxy. Hits `/livez` on the backend port
+/// directly first (bypasses the intercept layer on 6767). Falls back to
+/// `/health` for older headroom-ai versions that don't expose `/livez`, then
+/// through the intercept layer on 6767 as a last resort — which also succeeds
+/// if the proxy is alive but too CPU-saturated to answer a direct probe
+/// quickly, since the intercept has its own retry + longer timeout path.
+fn probe_proxy_livez(client: &reqwest::blocking::Client) -> bool {
+    let backend = crate::backend_port::get();
+    let urls = [
+        format!("http://127.0.0.1:{backend}/livez"),
+        format!("http://127.0.0.1:{backend}/health"),
+        "http://127.0.0.1:6767/livez".to_string(),
+        "http://127.0.0.1:6767/health".to_string(),
+    ];
+    for url in &urls {
+        if client
+            .get(url)
+            .send()
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// HuggingFace hub cache path — where transformers/huggingface_hub write
+/// downloaded model weights. HF respects ``$HF_HOME`` but we set neither
+/// in the bundled runtime, so the default ``$HOME/.cache/huggingface/hub``
+/// is what we observe. Returns None if we can't resolve a home dir or the
+/// path doesn't exist yet (first-run pre-download).
+fn hf_hub_cache_dir() -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    let path = home.join(".cache").join("huggingface").join("hub");
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Total byte size of every regular file under ``path``. Used as a
+/// "is the proxy downloading models right now" signal: HF model
+/// downloads land in this tree and grow it monotonically, even when
+/// the python process is otherwise quiet (no log writes). Errors
+/// during the walk are swallowed — a partial sum is still a useful
+/// signal, and a zero sum just means we miss this tick of evidence.
+///
+/// Bounded by ``max_entries`` to keep cost predictable on a warm
+/// cache that already has tens of thousands of files.
+fn total_dir_size_bytes(path: &std::path::Path, max_entries: usize) -> u64 {
+    let mut total: u64 = 0;
+    let mut visited: usize = 0;
+    let mut stack: Vec<std::path::PathBuf> = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if visited >= max_entries {
+            break;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited >= max_entries {
+                break;
+            }
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if file_type.is_symlink() {
+                // HF cache uses symlinks under ``snapshots/`` pointing into
+                // ``blobs/``. Counting the blobs is enough; following the
+                // symlink would double-count.
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                if let Ok(meta) = entry.metadata() {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Whether log mtime advanced since the last poll. Counts the
+/// transition None → Some(t) (first observation after the proxy
+/// began writing) as advancement; a Some → None transition does not
+/// (logs don't disappear during a healthy boot).
+fn log_mtime_advanced(
+    prev: Option<std::time::SystemTime>,
+    current: Option<std::time::SystemTime>,
+) -> bool {
+    current.is_some() && current != prev
+}
+
+/// Whether the HF cache grew since the last poll. The first
+/// observation (no prev) counts as growth iff the directory has
+/// any content — that handles the "cache appeared partway through
+/// boot" case where the dir didn't exist when we started but does
+/// now. A shrink (which can happen if HF prunes its cache during
+/// boot — rare but possible) is *not* growth.
+fn hf_cache_grew(prev: Option<u64>, current: u64) -> bool {
+    match prev {
+        Some(p) => current > p,
+        None => current > 0,
+    }
+}
+
+/// Whether the proxy is bound to its loopback port. Activity-only
+/// signal — does NOT imply reachability. The kernel still completes
+/// `accept()` even when uvicorn's event loop is held by an in-flight
+/// upstream call (e.g. a forwarded `POST /v1/messages` retrying
+/// against a 429-ing Anthropic), so a successful TCP connect proves
+/// the python process is alive and bound, even when no HTTP endpoint
+/// (`/livez`, `/health`, `/stats`) answers within the probe window.
+/// 1s timeout is enough for a localhost SYN/SYN-ACK and short enough
+/// not to dominate the 500ms loop tick if the OS is mid-bind.
+fn tcp_port_accepts_connection(addr: std::net::SocketAddr, timeout: std::time::Duration) -> bool {
+    std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()
+}
+
+/// Probe the proxy's loopback port with a 1s timeout. See
+/// [`tcp_port_accepts_connection`] for semantics. The backend port is
+/// normally 6768 but may have been switched to a fallback by `backend_port`.
+pub(crate) fn proxy_port_accepts_connection() -> bool {
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], crate::backend_port::get()).into();
+    tcp_port_accepts_connection(addr, std::time::Duration::from_secs(1))
+}
+
+/// Parse the `ps -p PID -o time=` accumulated CPU time format.
+/// macOS `ps` emits this as `MM:SS.ss`, `HH:MM:SS`, or `D-HH:MM:SS`
+/// depending on duration. Returns whole seconds; sub-second precision
+/// is dropped (we only care about per-tick advancement, which is
+/// always >=1s of CPU work to register).
+fn parse_ps_cpu_time(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (days, rest) = match trimmed.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0u64, trimmed),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    let (h, m, s_raw) = match parts.as_slice() {
+        [h, m, s] => (h.parse::<u64>().ok()?, m.parse::<u64>().ok()?, *s),
+        [m, s] => (0u64, m.parse::<u64>().ok()?, *s),
+        _ => return None,
+    };
+    // Drop fractional seconds.
+    let s_whole = s_raw.split('.').next()?.parse::<u64>().ok()?;
+    Some(days * 86400 + h * 3600 + m * 60 + s_whole)
+}
+
+/// Read accumulated CPU time (seconds) for ``pid`` via macOS `ps`.
+/// Returns None if the process is gone or `ps` fails. Cheap enough
+/// to call on a 500ms boot-validation tick — fork+exec of a tiny
+/// system binary, no I/O beyond the kernel proc table.
+pub(crate) fn tracked_process_cpu_time_secs(pid: u32) -> Option<u64> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "time="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_ps_cpu_time(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Whether the tracked process's accumulated CPU time advanced since
+/// the previous observation. Catches the "alive but silent" case —
+/// e.g. ONNX graph compile, model load, any synchronous CPU-bound
+/// work in the proxy's lifespan startup that produces no log writes,
+/// no HF cache growth, and doesn't yet bind :6768. Treats the first
+/// observation (None → Some(>0)) as growth so a process that's
+/// already burned cycles before we started polling counts as active;
+/// None → Some(0) is "just spawned, not yet doing work" and is NOT
+/// growth (matches `hf_cache_grew` semantics).
+fn cpu_time_advanced(prev: Option<u64>, current: Option<u64>) -> bool {
+    match (prev, current) {
+        (Some(p), Some(c)) => c > p,
+        (None, Some(c)) => c > 0,
+        _ => false,
+    }
+}
+
+/// Pure decision function for the boot-validation stall guard.
+/// Extracted from the polling loop so it can be tested without
+/// mocking the filesystem, the network, and a clock.
+///
+/// Returns true iff we have waited past the grace window AND
+/// nothing has refreshed the activity timer for the silence window.
+/// Boundaries are strict (>) so consts read intuitively as
+/// "starts checking after grace, fires after silence."
+fn boot_validation_stalled(
+    elapsed: std::time::Duration,
+    activity_age: std::time::Duration,
+    grace: std::time::Duration,
+    silence: std::time::Duration,
+) -> bool {
+    elapsed > grace && activity_age > silence
+}
+
+/// Newest mtime of any `headroom-proxy*.log` file in the logs directory, as
+/// a "is the proxy doing anything" signal. Returns None if no logs yet.
+pub(crate) fn newest_proxy_log_mtime(logs_dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    let entries = std::fs::read_dir(logs_dir).ok()?;
+    let mut newest: Option<std::time::SystemTime> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with("headroom-proxy") || !name_str.ends_with(".log") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(mtime) = meta.modified() {
+                newest = Some(match newest {
+                    Some(prev) if prev > mtime => prev,
+                    _ => mtime,
+                });
+            }
+        }
+    }
+    newest
+}
+
+/// User-facing message shown during boot validation. Evolves with elapsed
+/// time and whether the proxy log is actively being written to. Cycles
+/// through a rotating set of sub-messages per phase so the UI never looks
+/// frozen even when all phases last a while.
+fn boot_validation_message(elapsed_secs: u64, active: bool) -> String {
+    let prefix = if elapsed_secs < 10 {
+        "Launching Headroom".to_string()
+    } else if elapsed_secs < 30 {
+        if active {
+            "Warming up Headroom's runtime".to_string()
+        } else {
+            "Launching Headroom".to_string()
+        }
+    } else if elapsed_secs < 90 {
+        // Rotate across a few descriptive phrasings so the line changes
+        // every ~10 seconds instead of repeating identically.
+        let rotation = (elapsed_secs / 10) % 3;
+        match rotation {
+            0 => "Preparing Headroom's ML subsystems".to_string(),
+            1 => "Loading optimization pipeline".to_string(),
+            _ => "Initializing caches and request handlers".to_string(),
+        }
+    } else if elapsed_secs < 240 {
+        let rotation = (elapsed_secs / 15) % 3;
+        match rotation {
+            0 => "Downloading Headroom's ML models (first-run only)".to_string(),
+            1 => "Fetching model weights from Hugging Face".to_string(),
+            _ => "Preparing model caches for first-time use".to_string(),
+        }
+    } else {
+        "Finishing up the first-run download — slower connections may take several more minutes"
+            .to_string()
+    };
+
+    let hint = if active {
+        " · activity detected"
+    } else if elapsed_secs > 60 {
+        " · this is normal for a first-time upgrade"
+    } else {
+        ""
+    };
+
+    format!("{prefix}… ({}s elapsed{})", elapsed_secs, hint)
+}
+
+/// Reasons `ensure_headroom_running` may have returned `Ok(())` without
+/// actually spawning a tracked child. Captured immediately after the call so
+/// a "Stalled" / "NotStarted" Sentry event can attribute the silent no-op.
+#[derive(Debug, Clone)]
+struct PostSpawnSnapshot {
+    tracked_child: bool,
+    python_installed: bool,
+    proxy_bypass: bool,
+    pricing_allows_optimization: bool,
+    runtime_paused: bool,
+    proxy_reachable: bool,
+    ensure_error: Option<String>,
+}
+
+/// Outcome of the boot-validation loop.
+#[derive(Debug)]
+pub enum BootValidationOutcome {
+    /// Proxy reachable via /livez within the max timeout.
+    Reachable,
+    /// Proxy process exited before becoming reachable.
+    ProcessExited,
+    /// No log activity for long enough that we consider the proxy stalled.
+    Stalled,
+    /// Hit the absolute max without reachability or obvious failure.
+    TimedOut,
+    /// `ensure_headroom_running` short-circuited or errored — there is no
+    /// tracked child to wait on AND no externally-reachable proxy on :6768.
+    /// Reported instead of `Stalled` so we don't burn ~120s waiting for a
+    /// process that was never going to start.
+    NotStarted,
+}
+
+impl BootValidationOutcome {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, BootValidationOutcome::Reachable)
+    }
+    pub fn label(&self) -> &'static str {
+        match self {
+            BootValidationOutcome::Reachable => "reachable",
+            BootValidationOutcome::ProcessExited => "process_exited",
+            BootValidationOutcome::Stalled => "stalled",
+            BootValidationOutcome::TimedOut => "timed_out",
+            BootValidationOutcome::NotStarted => "not_started",
+        }
+    }
+}
+
+pub struct AppState {
+    pub tool_manager: ToolManager,
+    pub recent_usage: Mutex<Vec<UsageEvent>>,
+    pub headroom_process: Mutex<Option<Child>>,
+    lifecycle_lock: Mutex<()>,
+    /// Held for the full duration of a runtime upgrade. A second call to
+    /// `run_upgrade_with_ui` tries `try_lock` and bails if already held.
+    upgrade_lock: Mutex<()>,
+    pub runtime_paused: Mutex<bool>,
+    pub runtime_starting: Mutex<bool>,
+    /// True while an atomic runtime upgrade is running (install + boot validation).
+    /// Gates the watchdog from auto-pausing during the ~minutes-long upgrade.
+    pub runtime_upgrade_in_progress: Mutex<bool>,
+    pub runtime_upgrade_progress: Mutex<RuntimeUpgradeProgress>,
+    pub last_startup_error: Mutex<Option<String>>,
+    pub bootstrap_progress: Mutex<BootstrapProgress>,
+    pub headroom_learn_state: Mutex<HeadroomLearnRuntimeState>,
+    /// Last Claude AI OAuth bearer token seen passing through the proxy intercept.
+    /// Only populated when the user runs Claude Code authenticated via Claude AI (not API key).
+    /// Wrapped in Arc so the proxy_intercept task can share it without going through AppState.
+    pub claude_bearer_token: Arc<Mutex<Option<BearerToken>>>,
+    /// When true, the Rust intercept on :6767 forwards traffic directly to
+    /// api.anthropic.com instead of the Python proxy on :6768. Flipped on by
+    /// `enforce_pricing_gate` once a Pro/Max user crosses the disable threshold
+    /// without a Headroom subscription, so existing CC sessions stay alive
+    /// while optimization is genuinely off.
+    pub proxy_bypass: Arc<AtomicBool>,
+    /// Number of consecutive `apply_pricing_gate_status` calls that reported
+    /// `optimization_allowed=false` while bypass was off. Acts as a debounce:
+    /// the ungated→gated transition only fires once this hits
+    /// `PRICING_GATE_DEBOUNCE_POLLS`. Reset to 0 on any ungated poll. Prevents
+    /// a single bad pricing read (network blip, brief utilization spike) from
+    /// flipping the gate off and back on within minutes.
+    pricing_gate_violation_streak: Arc<AtomicU32>,
+    launch_profile: Mutex<LaunchProfile>,
+    launch_profile_path: std::path::PathBuf,
+    last_known_good_plan: Mutex<Option<LastKnownGoodPlan>>,
+    last_known_good_plan_path: std::path::PathBuf,
+    savings_tracker: Mutex<SavingsTracker>,
+    activity_facts: Mutex<ActivityFacts>,
+    cached_clients: Mutex<Option<(Vec<ClientStatus>, Instant)>>,
+    cached_headroom_stats: Mutex<Option<(Option<HeadroomDashboardStats>, Instant)>>,
+    cached_headroom_history: Mutex<Option<(Option<HeadroomSavingsHistoryResponse>, Instant)>>,
+    cached_rtk_gain_summary: Mutex<Option<(Option<RtkGainSummary>, Instant)>>,
+    cached_rtk_today_stats: Mutex<Option<(Option<crate::models::RtkTodayStats>, Instant)>>,
+    cached_claude_profile: Mutex<Option<(Option<String>, ClaudeAccountProfile, Instant)>>,
+    /// Cached stdout of `headroom memory export`. Shared by every OptimizePanel
+    /// that mounts at once — without it, N panels = N Python cold-starts.
+    cached_memory_export: Mutex<Option<(String, Instant)>>,
+    /// Cached result of `list_claude_code_projects`. Scanning the projects dir,
+    /// reading session files, and computing per-project learn metadata is the
+    /// main cost of opening the Optimize tab. TTL is short enough that
+    /// just-finished learn runs appear promptly once their explicit
+    /// invalidation fires.
+    cached_claude_code_projects: Mutex<Option<(Vec<ClaudeCodeProject>, Instant)>>,
+    /// Cached `detect_headroom_learn_prereq_status`. The Claude CLI location
+    /// can't change without explicit user action during a session, and the
+    /// fallback shell probe can take up to 2s, so we keep this sticky and
+    /// expose an invalidator for the user's "Re-check" button.
+    cached_headroom_learn_prereq: Mutex<Option<HeadroomLearnPrereqStatus>>,
+    /// Cached `runtime_status()` output. The tray-icon updater, proxy
+    /// watchdog, and frontend pollers all ask for runtime status on tight
+    /// intervals; each uncached call hits `is_headroom_proxy_reachable`
+    /// (blocking HTTP) plus a handful of file stats. A short TTL dedupes
+    /// the work across all those callers without any visible lag.
+    cached_runtime_status: Mutex<Option<(RuntimeStatus, Instant)>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeadroomLearnRuntimeState {
+    running: bool,
+    project_path: Option<String>,
+    started_at: Option<chrono::DateTime<Utc>>,
+    finished_at: Option<chrono::DateTime<Utc>>,
+    success: Option<bool>,
+    summary: String,
+    error: Option<String>,
+    output_tail: Vec<String>,
+}
+
+impl AppState {
+    pub fn new() -> Result<Self> {
+        Self::new_in(app_data_dir())
+    }
+
+    pub(crate) fn new_in(base_dir: PathBuf) -> Result<Self> {
+        ensure_data_dirs(&base_dir)?;
+
+        let runtime = ManagedRuntime::bootstrap_root(&base_dir);
+        let tool_manager = ToolManager::new(runtime);
+        let (launch_profile, launch_profile_path) = LaunchProfile::load_or_create(&base_dir)?;
+        let (last_known_good_plan, last_known_good_plan_path) = LastKnownGoodPlan::load(&base_dir);
+        let savings_tracker = SavingsTracker::load_or_create(&base_dir)?;
+        let activity_facts = ActivityFacts::load_or_create(&base_dir)?;
+
+        let state = Self {
+            tool_manager,
+            recent_usage: Mutex::new(Vec::new()),
+            headroom_process: Mutex::new(None),
+            lifecycle_lock: Mutex::new(()),
+            upgrade_lock: Mutex::new(()),
+            runtime_paused: Mutex::new(false),
+            runtime_starting: Mutex::new(false),
+            runtime_upgrade_in_progress: Mutex::new(false),
+            runtime_upgrade_progress: Mutex::new(RuntimeUpgradeProgress {
+                running: false,
+                complete: false,
+                failed: false,
+                current_step: "Idle".into(),
+                message: String::new(),
+                overall_percent: 0,
+                from_version: None,
+                to_version: None,
+            }),
+            last_startup_error: Mutex::new(None),
+            bootstrap_progress: Mutex::new(BootstrapProgress {
+                running: false,
+                complete: false,
+                failed: false,
+                current_step: "Idle".into(),
+                message: "Installer has not started.".into(),
+                current_step_eta_seconds: 0,
+                overall_percent: 0,
+            }),
+            claude_bearer_token: Arc::new(Mutex::new(None)),
+            proxy_bypass: Arc::new(AtomicBool::new(false)),
+            pricing_gate_violation_streak: Arc::new(AtomicU32::new(0)),
+            headroom_learn_state: Mutex::new(HeadroomLearnRuntimeState {
+                running: false,
+                project_path: None,
+                started_at: None,
+                finished_at: None,
+                success: None,
+                summary: "Select a project to run headroom learn.".into(),
+                error: None,
+                output_tail: Vec::new(),
+            }),
+            launch_profile: Mutex::new(launch_profile),
+            launch_profile_path,
+            last_known_good_plan: Mutex::new(last_known_good_plan),
+            last_known_good_plan_path,
+            savings_tracker: Mutex::new(savings_tracker),
+            activity_facts: Mutex::new(activity_facts),
+            cached_clients: Mutex::new(None),
+            cached_headroom_stats: Mutex::new(None),
+            cached_headroom_history: Mutex::new(None),
+            cached_rtk_gain_summary: Mutex::new(None),
+            cached_rtk_today_stats: Mutex::new(None),
+            cached_claude_profile: Mutex::new(None),
+            cached_memory_export: Mutex::new(None),
+            cached_claude_code_projects: Mutex::new(None),
+            cached_headroom_learn_prereq: Mutex::new(None),
+            cached_runtime_status: Mutex::new(None),
+        };
+
+        Ok(state)
+    }
+
+    pub fn warm_runtime_on_launch(&self, app: &tauri::AppHandle) {
+        // Always check for a mid-upgrade interrupt first. If the last app
+        // run was killed between move-aside and commit, the venv.backup/
+        // dir holds the real working environment and the live venv is a
+        // partial install. Restore before doing anything else.
+        let _ = self.tool_manager.recover_from_interrupted_upgrade();
+
+        if !self.tool_manager.python_runtime_installed() {
+            // First-run; start_bootstrap (wizard) handles install.
+            return;
+        }
+
+        self.set_runtime_starting(true);
+        self.enforce_pricing_gate();
+        self.stop_python_if_gated();
+
+        if let Err(err) = ensure_rtk_integrations(
+            &self.tool_manager.rtk_entrypoint(),
+            &self.tool_manager.managed_python(),
+        ) {
+            log::warn!("RTK integrations failed during warm_runtime_on_launch: {err}");
+        }
+
+        // App-version-triggered atomic runtime upgrade. Replaces the old
+        // receipt-vs-pinned drift path.
+        if self.should_run_runtime_upgrade(app) {
+            // Auto-trigger never forces rebuild — that's reserved for the
+            // user-facing "Retry with full rebuild" recovery flow.
+            self.run_upgrade_with_ui(app, false);
+        }
+
+        // Independent of the upgrade: if MCP is not configured (e.g. it failed
+        // during a prior install), retry it now.
+        if let Err(err) = self.tool_manager.ensure_mcp_configured() {
+            // install_headroom_mcp captures rich structured data to Sentry
+            // at the failure site; log to file only to avoid a duplicate
+            // (and stripped) Sentry event from the FileLogger forwarder.
+            log::info!("headroom MCP configuration failed: {err:#}");
+        }
+
+        match self.ensure_headroom_running() {
+            Ok(()) => {
+                crate::port_conflict::note_proxy_started(app);
+            }
+            Err(err) => {
+                log::debug!("failed to auto-start headroom during app launch: {err}");
+                let handled = crate::port_conflict::note_proxy_failed(app, &err, true);
+                if !handled {
+                    crate::capture_headroom_start_failure(
+                        "headroom auto-start failed during launch",
+                        &err,
+                    );
+                }
+            }
+        }
+
+        // Hold `starting` until the probe `runtime_status()` uses
+        // (`is_headroom_proxy_reachable` → 6767/readyz) actually returns true.
+        // `wait_for_boot_validation` accepts /livez, which can flip green
+        // before /readyz does; clearing `starting` on livez alone opens a
+        // window where the UI poller sees !running && !starting and fires
+        // the "Headroom isn't running" notification while readiness is still
+        // loading.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            if is_headroom_proxy_reachable() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+
+        self.set_runtime_starting(false);
+    }
+
+    fn runtime_maintenance_plan_for_app_version(
+        &self,
+        current_app_version: &str,
+    ) -> Option<RuntimeMaintenancePlan> {
+        if runtime_upgrade_disabled_by_env() {
+            log::debug!("HEADROOM_SKIP_RUNTIME_UPGRADE is set — skipping runtime upgrade check.");
+            return None;
+        }
+        let profile = self.launch_profile.lock();
+        let version_matches = profile
+            .last_launched_app_version
+            .as_deref()
+            .map(|v| v == current_app_version)
+            .unwrap_or(false);
+        if version_matches {
+            return None;
+        }
+        if let Some(failure) = profile.last_runtime_upgrade_failure.as_ref() {
+            if failure.app_version == current_app_version
+                && failure.attempts >= MAX_UPGRADE_AUTO_RETRIES
+            {
+                return None;
+            }
+        }
+        drop(profile);
+        if let Some(release) = self.tool_manager.check_headroom_upgrade() {
+            return Some(RuntimeMaintenancePlan::Upgrade(release));
+        }
+        if self.tool_manager.requirements_are_stale() {
+            return Some(RuntimeMaintenancePlan::RequirementsRepair);
+        }
+        None
+    }
+
+    /// Returns true if the app version changed since the last successful
+    /// launch AND an actual upgrade is needed (either headroom-ai version
+    /// mismatch or requirements lock drift). Also gates on the retry budget
+    /// from any prior upgrade failure, and on `HEADROOM_SKIP_RUNTIME_UPGRADE`.
+    pub fn should_run_runtime_upgrade(&self, app: &tauri::AppHandle) -> bool {
+        self.runtime_maintenance_plan_for_app_version(&app.package_info().version.to_string())
+            .is_some()
+    }
+
+    /// Run a full atomic runtime upgrade with UI progress + boot validation.
+    ///
+    /// Acquires `upgrade_lock` to guard against concurrent launches. Stops
+    /// the proxy, runs `atomic_upgrade_headroom`, then validates the new
+    /// runtime by waiting for proxy reachability. On boot-validation failure,
+    /// rolls back to the previous venv and records a failure so the UI can
+    /// render a retry banner.
+    ///
+    /// `force_rebuild` skips the in-place upgrade attempt and goes straight
+    /// to atomic rebuild. Set by the user-facing "Retry with full rebuild"
+    /// flow when an in-place upgrade installed cleanly but the proxy
+    /// failed to boot — typically an ABI mismatch in native deps that pip
+    /// can't detect.
+    pub fn run_upgrade_with_ui(&self, app: &tauri::AppHandle, force_rebuild: bool) {
+        let _guard = match self.upgrade_lock.try_lock() {
+            Some(g) => g,
+            None => {
+                log::debug!("run_upgrade_with_ui: upgrade already running; skipping");
+                return;
+            }
+        };
+
+        let current_app_version = app.package_info().version.to_string();
+        let maintenance_plan =
+            match self.runtime_maintenance_plan_for_app_version(&current_app_version) {
+                Some(plan) => plan,
+                None => {
+                    // App version changed but no runtime maintenance is actually
+                    // needed — just stamp the version.
+                    self.stamp_app_version(&current_app_version);
+                    return;
+                }
+            };
+        let maintenance_kind = match &maintenance_plan {
+            RuntimeMaintenancePlan::Upgrade(_) => RuntimeMaintenanceKind::Upgrade,
+            RuntimeMaintenancePlan::RequirementsRepair => {
+                RuntimeMaintenanceKind::RequirementsRepair
+            }
+        };
+        let target_version = match &maintenance_plan {
+            RuntimeMaintenancePlan::Upgrade(release) => release.version().to_string(),
+            RuntimeMaintenancePlan::RequirementsRepair => self
+                .tool_manager
+                .installed_headroom_version()
+                .unwrap_or_else(|| "unknown".into()),
+        };
+        let installed_version = self.tool_manager.installed_headroom_version();
+
+        // User-facing from/to are the app versions — headroom-ai versions are
+        // an implementation detail tracked in the failure record only.
+        let previous_app_version = self.launch_profile.lock().last_launched_app_version.clone();
+
+        // Snapshot the newest proxy log mtime BEFORE we stop the old proxy and
+        // install the new one. At failure time we compare against this to tell
+        // "the new proxy wrote some logs (so it at least started python)" from
+        // "the new proxy never produced any log activity (likely failed to
+        // spawn or crashed pre-import)".
+        let pre_upgrade_log_mtime = newest_proxy_log_mtime(&self.tool_manager.logs_dir());
+
+        *self.runtime_upgrade_in_progress.lock() = true;
+        self.invalidate_runtime_status_cache();
+
+        // Set up progress state + emit initial event.
+        self.set_upgrade_progress(|p| {
+            p.running = true;
+            p.complete = false;
+            p.failed = false;
+            p.current_step = "Preparing update".into();
+            p.message = "Wrapping up the Headroom update.".into();
+            p.overall_percent = 0;
+            p.from_version = previous_app_version.clone();
+            p.to_version = Some(current_app_version.clone());
+        });
+        emit_runtime_upgrade_progress(app, self);
+
+        self.stop_headroom();
+
+        analytics::track_event(
+            app,
+            "runtime_upgrade_started",
+            Some(serde_json::json!({
+                "maintenance_kind": match maintenance_kind {
+                    RuntimeMaintenanceKind::Upgrade => "upgrade",
+                    RuntimeMaintenanceKind::RequirementsRepair => "requirements_repair",
+                },
+                "from_version": installed_version,
+                "to_version": target_version,
+                "app_version": current_app_version,
+            })),
+        );
+
+        let start = std::time::Instant::now();
+        let app_for_progress = app.clone();
+        // SAFETY: self has a stable address for the duration of this call; the
+        // closure runs inline and does not outlive this scope.
+        let self_ptr: *const AppState = self as *const AppState;
+        let progress = move |step: BootstrapStepUpdate| {
+            let state_ref = unsafe { &*self_ptr };
+            state_ref.set_upgrade_progress(|p| {
+                p.current_step = step.step.to_string();
+                p.message = step.message.clone();
+                p.overall_percent = step.percent;
+            });
+            emit_runtime_upgrade_progress(&app_for_progress, state_ref);
+        };
+
+        use crate::tool_manager::UpgradeOutcome;
+        let needs_commit_or_rollback = matches!(maintenance_kind, RuntimeMaintenanceKind::Upgrade);
+        // Ok carries the pip-output tail captured during install — empty
+        // string for RequirementsRepair (no pip ran in our wrapper) and for
+        // any path that didn't request a capture. Held across the
+        // install→boot-validation boundary so a later boot-validation
+        // failure can attach it to the Sentry event.
+        let install_result: Result<String, (bool, anyhow::Error)> = match maintenance_plan {
+            RuntimeMaintenancePlan::Upgrade(release) => {
+                match self
+                    .tool_manager
+                    .atomic_upgrade_headroom(&release, progress, force_rebuild)
+                {
+                    UpgradeOutcome::InstalledPendingValidation { pip_output_tail } => {
+                        Ok(pip_output_tail)
+                    }
+                    UpgradeOutcome::InstallFailed { restored, error } => Err((restored, error)),
+                }
+            }
+            RuntimeMaintenancePlan::RequirementsRepair => self
+                .tool_manager
+                .repair_stale_requirements_with_progress(progress)
+                .map(|()| String::new())
+                .map_err(|error| (false, error)),
+        };
+        let install_pip_output_tail: String = match install_result {
+            Err((restored, error)) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                log::warn!(
+                    "run_upgrade_with_ui: install failed after {duration_ms}ms (restored={restored}): {error:#}"
+                );
+                let restarted = self.ensure_headroom_running().is_ok();
+                let hint = crate::classify_upgrade_error(&error);
+                let fallback_hint = match maintenance_kind {
+                    RuntimeMaintenanceKind::Upgrade if restored && restarted => {
+                        Some("Restarted Headroom with the previous runtime.".into())
+                    }
+                    RuntimeMaintenanceKind::Upgrade if restored => {
+                        Some("Restored the previous runtime, but Headroom still needs a manual restart.".into())
+                    }
+                    RuntimeMaintenanceKind::Upgrade => {
+                        Some("Headroom update failed and the previous runtime could not be restored automatically.".into())
+                    }
+                    RuntimeMaintenanceKind::RequirementsRepair if restarted => {
+                        Some("Restarted Headroom with the existing runtime.".into())
+                    }
+                    RuntimeMaintenanceKind::RequirementsRepair => {
+                        Some("Dependency repair failed and Headroom could not be restarted automatically.".into())
+                    }
+                };
+                self.record_upgrade_failure(RuntimeUpgradeFailure {
+                    app_version: current_app_version.clone(),
+                    target_headroom_version: target_version.clone(),
+                    fallback_headroom_version: installed_version.clone(),
+                    failure_phase: UpgradeFailurePhase::Install,
+                    attempts: 0, // filled in by record_upgrade_failure
+                    first_attempt_at: Utc::now(),
+                    last_attempt_at: Utc::now(),
+                    error_message: format!("{error:#}"),
+                    error_hint: hint.or(fallback_hint),
+                    rollback_restored: restored || restarted,
+                });
+                crate::capture_upgrade_failure(
+                    &error,
+                    restored,
+                    "install",
+                    None,
+                    Some(duration_ms),
+                    Some(target_version.as_str()),
+                    installed_version.as_deref(),
+                    None,
+                    None,
+                );
+                analytics::track_event(
+                    app,
+                    "runtime_upgrade_failed",
+                    Some(serde_json::json!({
+                        "phase": "install",
+                        "maintenance_kind": match maintenance_kind {
+                            RuntimeMaintenanceKind::Upgrade => "upgrade",
+                            RuntimeMaintenanceKind::RequirementsRepair => "requirements_repair",
+                        },
+                        "attempt": self.upgrade_failure_attempts(&current_app_version),
+                        "app_version": current_app_version,
+                        "restored": restored,
+                        "restarted": restarted,
+                        "duration_ms": duration_ms,
+                    })),
+                );
+                self.set_upgrade_progress(|p| {
+                    p.running = false;
+                    p.complete = false;
+                    p.failed = true;
+                    p.current_step = "Install failed".into();
+                    p.message = match maintenance_kind {
+                        RuntimeMaintenanceKind::Upgrade if restored && restarted => {
+                            "Headroom update couldn't install. The previous runtime was restored and restarted.".into()
+                        }
+                        RuntimeMaintenanceKind::Upgrade if restored => {
+                            "Headroom update couldn't install. The previous runtime was restored, but it still needs a restart.".into()
+                        }
+                        RuntimeMaintenanceKind::Upgrade => {
+                            "Headroom update couldn't install, and the previous runtime could not be restored automatically.".into()
+                        }
+                        RuntimeMaintenanceKind::RequirementsRepair if restarted => {
+                            "Headroom dependency repair failed. Restarted Headroom with the existing runtime.".into()
+                        }
+                        RuntimeMaintenanceKind::RequirementsRepair => {
+                            "Headroom dependency repair failed, and Headroom could not be restarted automatically.".into()
+                        }
+                    };
+                    p.overall_percent = 100;
+                });
+                emit_runtime_upgrade_progress(app, self);
+                *self.runtime_upgrade_in_progress.lock() = false;
+                self.invalidate_runtime_status_cache();
+                return;
+            }
+            Ok(tail) => tail,
+        };
+
+        // Boot validation: start the proxy and wait for reachability.
+        self.set_upgrade_progress(|p| {
+            p.current_step = "Verifying update".into();
+            p.message =
+                "Launching updated Headroom. This can take a minute — Headroom may need to download new ML models.".into();
+            p.overall_percent = 97;
+        });
+        emit_runtime_upgrade_progress(app, self);
+
+        let ensure_err = self
+            .ensure_headroom_running()
+            .err()
+            .map(|err| format!("{err:#}"));
+        if let Some(err) = ensure_err.as_deref() {
+            log::warn!("run_upgrade_with_ui: new proxy failed to spawn: {err}");
+        }
+        // Snapshot the conditions that gate ensure_headroom_running so a
+        // silent short-circuit ("we returned Ok(()) but never spawned") is
+        // attributable in Sentry instead of surfacing as a blank "Stalled".
+        let post_spawn = PostSpawnSnapshot {
+            tracked_child: self.headroom_process.lock().is_some(),
+            python_installed: self.tool_manager.python_runtime_installed(),
+            proxy_bypass: self.proxy_bypass.load(std::sync::atomic::Ordering::Acquire),
+            pricing_allows_optimization: self.pricing_allows_optimization(),
+            runtime_paused: self.runtime_is_paused(),
+            proxy_reachable: is_headroom_proxy_reachable(),
+            ensure_error: ensure_err,
+        };
+        log::info!(
+            "run_upgrade_with_ui: post-spawn tracked_child={} python_installed={} \
+             proxy_bypass={} pricing_allows_optimization={} runtime_paused={} \
+             proxy_reachable={} ensure_error={:?}",
+            post_spawn.tracked_child,
+            post_spawn.python_installed,
+            post_spawn.proxy_bypass,
+            post_spawn.pricing_allows_optimization,
+            post_spawn.runtime_paused,
+            post_spawn.proxy_reachable,
+            post_spawn.ensure_error,
+        );
+
+        let outcome = if !post_spawn.tracked_child && !post_spawn.proxy_reachable {
+            // No child to wait on AND nothing already listening on :6768.
+            // wait_for_boot_validation would burn ~120s of grace+silence
+            // here for nothing — bail with a distinct outcome so the
+            // failure path knows it's a non-start, not a hang.
+            log::warn!(
+                "run_upgrade_with_ui: skipping boot validation — no tracked child and no reachable proxy"
+            );
+            BootValidationOutcome::NotStarted
+        } else {
+            let app_for_progress = app.clone();
+            let self_ptr_progress: *const AppState = self as *const AppState;
+            self.wait_for_boot_validation(move |elapsed, active| {
+                let state_ref = unsafe { &*self_ptr_progress };
+                let elapsed_secs = elapsed.as_secs();
+                let message = boot_validation_message(elapsed_secs, active);
+                // Gently creep 97 → 99.5 over the max budget so the bar keeps
+                // moving — the user sees *something* happen during long waits.
+                let percent = 97
+                    + ((elapsed_secs as u128 * 250 / RUNTIME_UPGRADE_BOOT_MAX_SECS as u128)
+                        .min(250) as u8)
+                        / 100;
+                state_ref.set_upgrade_progress(|p| {
+                    p.message = message;
+                    p.overall_percent = percent.min(99);
+                });
+                emit_runtime_upgrade_progress(&app_for_progress, state_ref);
+            })
+        };
+        let boot_ok = outcome.is_ok();
+        let outcome_label = outcome.label();
+        let duration_ms = start.elapsed().as_millis() as u64;
+        log::debug!(
+            "run_upgrade_with_ui: boot validation {outcome_label} after {}s",
+            duration_ms / 1000
+        );
+
+        if boot_ok {
+            if needs_commit_or_rollback {
+                if let Err(err) = self.tool_manager.commit_headroom_upgrade() {
+                    log::warn!("commit_headroom_upgrade: non-fatal: {err:#}");
+                }
+            }
+            self.stamp_app_version(&current_app_version);
+            self.clear_upgrade_failure();
+            self.set_upgrade_progress(|p| {
+                p.running = false;
+                p.complete = true;
+                p.failed = false;
+                p.current_step = "Done".into();
+                p.message = match maintenance_kind {
+                    RuntimeMaintenanceKind::Upgrade => {
+                        format!("Headroom updated to {}.", current_app_version)
+                    }
+                    RuntimeMaintenanceKind::RequirementsRepair => {
+                        "Headroom runtime repair completed.".into()
+                    }
+                };
+                p.overall_percent = 100;
+            });
+            emit_runtime_upgrade_progress(app, self);
+            analytics::track_event(
+                app,
+                "runtime_upgrade_completed",
+                Some(serde_json::json!({
+                    "maintenance_kind": match maintenance_kind {
+                        RuntimeMaintenanceKind::Upgrade => "upgrade",
+                        RuntimeMaintenanceKind::RequirementsRepair => "requirements_repair",
+                    },
+                    "from_version": installed_version,
+                    "to_version": target_version,
+                    "duration_ms": duration_ms,
+                })),
+            );
+            analytics::set_headroom_ai_version(
+                app,
+                self.tool_manager.installed_headroom_version(),
+            );
+            // ensure_headroom_running's gate guards were suppressed during
+            // validation so a gated user's brand-new venv could actually be
+            // validated (otherwise we'd commit untested or roll back a
+            // perfectly good install). Now that the upgrade has committed,
+            // restore the gate state by stopping the validation Python if any
+            // gate is asserting Python should be down. Client-side routing is
+            // already pointed direct-to-Anthropic by whoever asserted the
+            // gate, so the validation Python wasn't receiving traffic anyway.
+            let gate_wants_python_down = self
+                .proxy_bypass
+                .load(std::sync::atomic::Ordering::Acquire)
+                || !self.pricing_allows_optimization()
+                || self.runtime_is_paused();
+            if gate_wants_python_down {
+                log::info!(
+                    "run_upgrade_with_ui: validation succeeded; stopping validation Python because a gate is active"
+                );
+                self.stop_headroom();
+            }
+            *self.runtime_upgrade_in_progress.lock() = false;
+            self.invalidate_runtime_status_cache();
+            return;
+        }
+
+        // Boot validation failed — roll back to the previous venv when we have
+        // one, otherwise leave the repaired runtime in place and surface the
+        // failure so the next launch can retry.
+        log::warn!(
+            "run_upgrade_with_ui: boot validation failed ({}); rolling back to {:?}",
+            outcome_label, installed_version
+        );
+        // Diagnostics for Sentry — capture before stop_headroom() tears down
+        // the tracked child and the proxy port. These three booleans
+        // distinguish the failure modes that all surface as "Stalled":
+        //   tracked_child=false → ensure_headroom_running silently no-op'd
+        //   new_proxy_log_written=false → spawn happened but python never
+        //                                 reached the logging setup
+        //   proxy_port_bound=false → uvicorn never reached its bind() call
+        let new_proxy_log_written = log_mtime_advanced(
+            pre_upgrade_log_mtime,
+            newest_proxy_log_mtime(&self.tool_manager.logs_dir()),
+        );
+        let boot_diagnostics = crate::UpgradeBootDiagnostics {
+            tracked_child: self.headroom_process.lock().is_some(),
+            new_proxy_log_written,
+            proxy_port_bound: proxy_port_accepts_connection(),
+            python_installed: post_spawn.python_installed,
+            proxy_bypass: post_spawn.proxy_bypass,
+            pricing_allows_optimization: post_spawn.pricing_allows_optimization,
+            runtime_paused: post_spawn.runtime_paused,
+            ensure_error: post_spawn.ensure_error.clone(),
+            pip_output_tail: install_pip_output_tail.clone(),
+        };
+
+        // Capture the tail of the proxy log BEFORE stop_headroom runs — for
+        // a process that crashed on its own, we want what was written right
+        // before the exit. Skip when no fresh writes happened during this
+        // validation window: the on-disk log is from a previous run and is
+        // actively misleading (the May 2026 incident showed 30 lines from a
+        // healthy proxy 16h before the failure).
+        let log_tail = if new_proxy_log_written {
+            crate::tool_manager::newest_proxy_log_path(&self.tool_manager.logs_dir())
+                .map(|path| crate::tool_manager::tail_log_file(&path, 30))
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+
+        self.stop_headroom();
+        let rollback_result = if needs_commit_or_rollback {
+            self.tool_manager.rollback_headroom_upgrade()
+        } else {
+            Ok(())
+        };
+        let rollback_restored = needs_commit_or_rollback && rollback_result.is_ok();
+        if let Err(err) = rollback_result {
+            log::error!("run_upgrade_with_ui: rollback failed: {err:#}");
+        }
+        analytics::set_headroom_ai_version(
+            app,
+            self.tool_manager.installed_headroom_version(),
+        );
+        let restarted = self.ensure_headroom_running().is_ok();
+
+        let err_msg = match log_tail.as_deref() {
+            Some(tail) => format!(
+                "Headroom maintenance for app {} failed boot validation ({}, ran {}ms; internal headroom-ai target: {}, fallback: {:?}).\n\n--- last proxy log lines ---\n{}",
+                current_app_version,
+                outcome_label,
+                duration_ms,
+                target_version,
+                installed_version,
+                tail
+            ),
+            None => format!(
+                "Headroom maintenance for app {} failed boot validation ({}, ran {}ms; internal headroom-ai target: {}, fallback: {:?}).\n\n(no new proxy log lines written during validation window)",
+                current_app_version,
+                outcome_label,
+                duration_ms,
+                target_version,
+                installed_version
+            ),
+        };
+        // Info-level: capture_upgrade_failure below fires a fully-tagged
+        // Level::Error Sentry event with target/fallback versions, log tail,
+        // boot diagnostics, and pip output. A warn! here would just produce
+        // a duplicate, less informative event.
+        log::info!("run_upgrade_with_ui: {err_msg}");
+        let err = anyhow::anyhow!("{}", err_msg);
+        let previous_app_label = previous_app_version
+            .clone()
+            .unwrap_or_else(|| "the previous version".into());
+        let error_hint = match maintenance_kind {
+            RuntimeMaintenanceKind::Upgrade if rollback_restored && restarted => Some(format!(
+                "Reverted to Headroom {} and restarted it.",
+                previous_app_label
+            )),
+            RuntimeMaintenanceKind::Upgrade if rollback_restored => {
+                Some(format!("Reverted to Headroom {}.", previous_app_label))
+            }
+            RuntimeMaintenanceKind::RequirementsRepair if restarted => Some(
+                "Headroom restarted with the repaired runtime, but validation still failed.".into(),
+            ),
+            RuntimeMaintenanceKind::RequirementsRepair => None,
+            _ => None,
+        };
+        self.record_upgrade_failure(RuntimeUpgradeFailure {
+            app_version: current_app_version.clone(),
+            target_headroom_version: target_version.clone(),
+            fallback_headroom_version: installed_version.clone(),
+            failure_phase: if maintenance_kind == RuntimeMaintenanceKind::Upgrade {
+                UpgradeFailurePhase::BootValidation
+            } else {
+                UpgradeFailurePhase::Install
+            },
+            attempts: 0,
+            first_attempt_at: Utc::now(),
+            last_attempt_at: Utc::now(),
+            error_message: err_msg.clone(),
+            error_hint,
+            rollback_restored: rollback_restored || restarted,
+        });
+        crate::capture_upgrade_failure(
+            &err,
+            rollback_restored || restarted,
+            if maintenance_kind == RuntimeMaintenanceKind::Upgrade {
+                "boot_validation"
+            } else {
+                "requirements_repair_boot_validation"
+            },
+            Some(outcome_label),
+            Some(duration_ms),
+            Some(target_version.as_str()),
+            installed_version.as_deref(),
+            log_tail.as_deref(),
+            Some(boot_diagnostics),
+        );
+        analytics::track_event(
+            app,
+            "runtime_upgrade_failed",
+            Some(serde_json::json!({
+                "phase": "boot_validation",
+                "maintenance_kind": match maintenance_kind {
+                    RuntimeMaintenanceKind::Upgrade => "upgrade",
+                    RuntimeMaintenanceKind::RequirementsRepair => "requirements_repair",
+                },
+                "attempt": self.upgrade_failure_attempts(&current_app_version),
+                "app_version": current_app_version,
+                "restored": rollback_restored,
+                "restarted": restarted,
+                "duration_ms": duration_ms,
+            })),
+        );
+        let current_app_label = current_app_version.clone();
+        let fallback_app_label = previous_app_version
+            .clone()
+            .unwrap_or_else(|| "the previous version".into());
+        self.set_upgrade_progress(|p| {
+            p.running = false;
+            p.complete = false;
+            p.failed = true;
+            p.current_step = "Update didn't start".into();
+            p.message = match maintenance_kind {
+                RuntimeMaintenanceKind::Upgrade if rollback_restored && restarted => {
+                    format!(
+                        "Headroom {} installed but didn't start. Reverted to {} and restarted it.",
+                        current_app_label, fallback_app_label
+                    )
+                }
+                RuntimeMaintenanceKind::Upgrade if rollback_restored => {
+                    format!(
+                        "Headroom {} installed but didn't start. Reverted to {}.",
+                        current_app_label, fallback_app_label
+                    )
+                }
+                RuntimeMaintenanceKind::Upgrade => format!(
+                    "Headroom {} installed but didn't start, and rollback failed. Reinstall from the Dashboard.",
+                    current_app_label
+                ),
+                RuntimeMaintenanceKind::RequirementsRepair if restarted => {
+                    "Headroom runtime repair finished, but startup validation still failed after restart.".into()
+                }
+                RuntimeMaintenanceKind::RequirementsRepair => {
+                    "Headroom runtime repair finished, but startup validation failed. Reinstall from the Dashboard.".into()
+                }
+            };
+            p.overall_percent = 100;
+        });
+        emit_runtime_upgrade_progress(app, self);
+        *self.runtime_upgrade_in_progress.lock() = false;
+        self.invalidate_runtime_status_cache();
+    }
+
+    /// User-initiated retry of a previously-failed runtime upgrade. Resets
+    /// the attempts counter so `should_run_runtime_upgrade` lets it through,
+    /// then invokes `run_upgrade_with_ui` directly.
+    ///
+    /// `force_rebuild` is the "Retry with full rebuild" path — skips the
+    /// in-place attempt and runs atomic rebuild from scratch. Use when the
+    /// previous attempt installed cleanly but the proxy never booted (the
+    /// ABI-mismatch failure mode).
+    pub fn retry_runtime_upgrade(&self, app: &tauri::AppHandle, force_rebuild: bool) {
+        {
+            let mut profile = self.launch_profile.lock();
+            if let Some(failure) = profile.last_runtime_upgrade_failure.as_mut() {
+                failure.attempts = 0;
+            }
+            persist_launch_profile(&self.launch_profile_path, &profile);
+        }
+        self.run_upgrade_with_ui(app, force_rebuild);
+    }
+
+    pub fn runtime_upgrade_in_progress(&self) -> bool {
+        *self.runtime_upgrade_in_progress.lock()
+    }
+
+    /// Returns true if the tracked Headroom process has DEFINITIVELY exited.
+    ///
+    /// Only reports exited on `Ok(Some(status))` — i.e., the OS told us the
+    /// child reaped. `None` (no tracked child) is NOT treated as exited,
+    /// because `ensure_headroom_running` intentionally skips spawning when
+    /// the intercept layer already reports the proxy reachable; in that
+    /// case there's a live proxy we just don't own the Child handle for.
+    /// `Err` (child was reaped by someone else) is also not treated as
+    /// exited — the OS-level process may well still be serving traffic.
+    pub(crate) fn headroom_process_exited(&self) -> Option<String> {
+        let mut guard = self.headroom_process.lock();
+        match guard.as_mut() {
+            None => None,
+            Some(child) => match child.try_wait() {
+                Ok(Some(status)) => Some(format!("{status}")),
+                Ok(None) => None,
+                Err(err) => {
+                    log::warn!(
+                        "headroom_process_exited: try_wait returned Err (treating as still alive): {err}"
+                    );
+                    None
+                }
+            },
+        }
+    }
+
+    /// Adaptive boot validation loop. Probes `/livez` on the backend port
+    /// (default 6768; may be a fallback in 6769..=6790) until the proxy
+    /// responds, the proxy process exits, the log goes silent past the
+    /// stall threshold, or `RUNTIME_UPGRADE_BOOT_MAX_SECS` elapses. On each
+    /// pass through the loop, emits a progress update via `on_progress`.
+    ///
+    /// "Activity" is the union of four signals: (1) a write to any
+    /// ``headroom-proxy*.log`` file, (2) growth in the HuggingFace hub
+    /// cache, (3) a successful TCP connect to the backend loopback port,
+    /// and (4) advancement of the tracked child's accumulated CPU time.
+    /// Any one resets the silence timer. The HF signal is what keeps
+    /// slow-but-progressing first-run downloads from being killed —
+    /// when transformers/huggingface_hub is silently pulling multi-GB
+    /// model weights, the python process writes nothing to its log,
+    /// but the cache directory grows monotonically. The TCP signal
+    /// covers the case where the proxy is alive and bound but its
+    /// asyncio event loop is held by an in-flight forwarded request
+    /// (e.g. a `POST /v1/messages` retrying against a 429-ing
+    /// upstream) — the kernel still completes ``accept()`` even when
+    /// uvicorn isn't draining the socket, so a successful connect
+    /// proves the python process is alive even though no HTTP
+    /// endpoint answers. The CPU-time signal covers a fourth case
+    /// that all three above miss: lifespan-phase work that's neither
+    /// writing logs nor downloading models nor yet bound to the port,
+    /// e.g. ONNX graph compilation or eager-loading already-cached
+    /// models. As long as the python process is burning CPU, it's
+    /// not deadlocked.
+    fn wait_for_boot_validation<F>(&self, mut on_progress: F) -> BootValidationOutcome
+    where
+        F: FnMut(std::time::Duration, bool),
+    {
+        use std::time::{Duration, Instant};
+
+        // 5s is generous: /livez is a cheap endpoint, but the proxy event
+        // loop can be held by the GIL while the pipeline chews through a
+        // large Claude request (tokenization, ONNX inference, etc). The
+        // previous 1.5s timeout false-fired during those bursts.
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return BootValidationOutcome::TimedOut,
+        };
+
+        let logs_dir = self.tool_manager.logs_dir();
+        let hf_cache = hf_hub_cache_dir();
+        // Cap the walk so a warm cache (post-install: ~3-5 GB across tens
+        // of thousands of files) doesn't dominate the 500ms loop tick.
+        // 50k entries is well above any healthy first-run install.
+        const HF_CACHE_WALK_CAP: usize = 50_000;
+
+        // Capture the tracked PID once at loop entry. If `headroom_process`
+        // is None now (e.g. ensure_headroom_running short-circuited or the
+        // spawn errored), it stays None for the duration — capturing once
+        // avoids re-acquiring the lock every 500ms.
+        let tracked_pid: Option<u32> = self.headroom_process.lock().as_ref().map(|c| c.id());
+
+        let start = Instant::now();
+        let mut last_log_activity = start;
+        let mut last_seen_mtime = newest_proxy_log_mtime(&logs_dir);
+        let mut last_hf_size = hf_cache
+            .as_deref()
+            .map(|p| total_dir_size_bytes(p, HF_CACHE_WALK_CAP));
+        let mut last_cpu_secs: Option<u64> = tracked_pid.and_then(tracked_process_cpu_time_secs);
+        let mut last_progress = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap_or_else(Instant::now);
+
+        let max = Duration::from_secs(RUNTIME_UPGRADE_BOOT_MAX_SECS);
+        let grace = Duration::from_secs(RUNTIME_UPGRADE_STALL_GRACE_SECS);
+        let silence = Duration::from_secs(RUNTIME_UPGRADE_STALL_SILENCE_SECS);
+        let progress_interval = Duration::from_secs(2);
+
+        loop {
+            if probe_proxy_livez(&client) {
+                return BootValidationOutcome::Reachable;
+            }
+
+            if let Some(exit_status) = self.headroom_process_exited() {
+                log::warn!(
+                    "wait_for_boot_validation: tracked proxy child exited with status {exit_status}"
+                );
+                return BootValidationOutcome::ProcessExited;
+            }
+
+            let elapsed = start.elapsed();
+            if elapsed >= max {
+                return BootValidationOutcome::TimedOut;
+            }
+
+            // Refresh log activity observation.
+            let current_mtime = newest_proxy_log_mtime(&logs_dir);
+            if log_mtime_advanced(last_seen_mtime, current_mtime) {
+                last_seen_mtime = current_mtime;
+                last_log_activity = Instant::now();
+            }
+
+            // Refresh HF cache observation. Growth in this tree means the
+            // proxy is downloading model weights — the most common
+            // not-actually-stuck cause of log silence on first-run installs.
+            if let Some(cache_path) = hf_cache.as_deref() {
+                let current_size = total_dir_size_bytes(cache_path, HF_CACHE_WALK_CAP);
+                if hf_cache_grew(last_hf_size, current_size) {
+                    last_log_activity = Instant::now();
+                }
+                last_hf_size = Some(current_size);
+            }
+
+            // Refresh TCP-bound observation. If the kernel accepts a
+            // connection on :6768, the python process is alive and
+            // listening — even if the asyncio loop is currently held
+            // by an in-flight forwarded request and no HTTP endpoint
+            // answers. This is the load-bearing signal that keeps a
+            // busy-but-alive proxy from being killed as "stalled".
+            let port_bound = proxy_port_accepts_connection();
+            if port_bound {
+                last_log_activity = Instant::now();
+            }
+
+            // Refresh CPU-time observation. Catches lifespan-phase work
+            // that's invisible to the three signals above — e.g. ONNX
+            // graph compile or eager-loading pre-cached models, which
+            // can sit silent for >90s while the python process is hot
+            // on a CPU. Only fires for the tracked child; if we don't
+            // own a Child handle (rare — ensure_headroom_running
+            // short-circuited or errored), this signal is unavailable
+            // and we lean on the other three.
+            let mut cpu_advanced = false;
+            if let Some(pid) = tracked_pid {
+                let current_cpu_secs = tracked_process_cpu_time_secs(pid);
+                if cpu_time_advanced(last_cpu_secs, current_cpu_secs) {
+                    last_log_activity = Instant::now();
+                    cpu_advanced = true;
+                }
+                last_cpu_secs = current_cpu_secs;
+            }
+
+            let activity_age = last_log_activity.elapsed();
+            let has_recent_activity = activity_age < silence
+                && (current_mtime.is_some()
+                    || last_hf_size.unwrap_or(0) > 0
+                    || port_bound
+                    || cpu_advanced);
+
+            // Past grace period and nothing has moved in either signal
+            // for the silence window → treat as stalled.
+            if boot_validation_stalled(elapsed, activity_age, grace, silence) {
+                return BootValidationOutcome::Stalled;
+            }
+
+            if last_progress.elapsed() >= progress_interval {
+                on_progress(elapsed, has_recent_activity);
+                last_progress = Instant::now();
+            }
+
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    pub fn runtime_upgrade_progress(&self) -> RuntimeUpgradeProgress {
+        self.runtime_upgrade_progress.lock().clone()
+    }
+
+    pub fn runtime_upgrade_failure(&self) -> Option<RuntimeUpgradeFailure> {
+        self.launch_profile
+            .lock()
+            .last_runtime_upgrade_failure
+            .clone()
+    }
+
+    fn set_upgrade_progress<F>(&self, mutate: F)
+    where
+        F: FnOnce(&mut RuntimeUpgradeProgress),
+    {
+        let mut p = self.runtime_upgrade_progress.lock();
+        mutate(&mut p);
+    }
+
+    fn stamp_app_version(&self, version: &str) {
+        let mut profile = self.launch_profile.lock();
+        profile.last_launched_app_version = Some(version.to_string());
+        persist_launch_profile(&self.launch_profile_path, &profile);
+    }
+
+    fn clear_upgrade_failure(&self) {
+        let mut profile = self.launch_profile.lock();
+        profile.last_runtime_upgrade_failure = None;
+        persist_launch_profile(&self.launch_profile_path, &profile);
+    }
+
+    pub fn dismiss_upgrade_failure(&self) {
+        self.clear_upgrade_failure();
+        self.invalidate_runtime_status_cache();
+    }
+
+    fn record_upgrade_failure(&self, mut failure: RuntimeUpgradeFailure) {
+        let mut profile = self.launch_profile.lock();
+        let attempts = match profile.last_runtime_upgrade_failure.as_ref() {
+            Some(prev) if prev.app_version == failure.app_version => {
+                prev.attempts.saturating_add(1)
+            }
+            _ => 1,
+        };
+        failure.attempts = attempts;
+        if let Some(prev) = profile.last_runtime_upgrade_failure.as_ref() {
+            if prev.app_version == failure.app_version {
+                failure.first_attempt_at = prev.first_attempt_at;
+            }
+        }
+        profile.last_runtime_upgrade_failure = Some(failure);
+        persist_launch_profile(&self.launch_profile_path, &profile);
+    }
+
+    fn upgrade_failure_attempts(&self, app_version: &str) -> u32 {
+        self.launch_profile
+            .lock()
+            .last_runtime_upgrade_failure
+            .as_ref()
+            .filter(|f| f.app_version == app_version)
+            .map(|f| f.attempts)
+            .unwrap_or(0)
+    }
+
+    pub fn launch_count(&self) -> u64 {
+        self.launch_profile.lock().launch_count
+    }
+
+    pub fn launch_experience_label(&self) -> &'static str {
+        match self.launch_profile.lock().launch_experience {
+            LaunchExperience::FirstRun => "first_run",
+            LaunchExperience::Resume => "resume",
+            LaunchExperience::Dashboard => "dashboard",
+        }
+    }
+
+    pub fn setup_wizard_complete(&self) -> bool {
+        self.launch_profile.lock().setup_wizard_complete
+    }
+
+    pub fn mark_setup_wizard_complete(&self) {
+        let mut profile = self.launch_profile.lock();
+        if profile.setup_wizard_complete {
+            return;
+        }
+        profile.setup_wizard_complete = true;
+        persist_launch_profile(&self.launch_profile_path, &profile);
+    }
+
+    pub fn cached_clients(&self) -> Vec<ClientStatus> {
+        const TTL: Duration = Duration::from_secs(8);
+        let mut cache = self.cached_clients.lock();
+        if let Some((ref clients, at)) = *cache {
+            if at.elapsed() < TTL {
+                return clients.clone();
+            }
+        }
+        let clients = detect_clients();
+        *cache = Some((clients.clone(), Instant::now()));
+        clients
+    }
+
+    pub fn cached_memory_export(&self) -> Option<String> {
+        // Long TTL is safe because:
+        //   - live-learning deletion explicitly calls `invalidate_memory_export_cache`
+        //   - the activity observer background thread keeps the cache warm on an
+        //     independent cadence, so cache misses rarely land on the IPC path
+        const TTL: Duration = Duration::from_secs(60);
+        let cache = self.cached_memory_export.lock();
+        if let Some((ref s, at)) = *cache {
+            if at.elapsed() < TTL {
+                return Some(s.clone());
+            }
+        }
+        None
+    }
+
+    pub fn store_memory_export(&self, stdout: String) {
+        *self.cached_memory_export.lock() = Some((stdout, Instant::now()));
+    }
+
+    pub fn invalidate_memory_export_cache(&self) {
+        *self.cached_memory_export.lock() = None;
+    }
+
+    /// Returns the captured Claude bearer token if it is still within its TTL.
+    /// Returns `None` if no token has been captured or the last capture is
+    /// stale — in either case the caller should prompt the user to send a
+    /// fresh request through the proxy.
+    pub fn current_bearer_token(&self) -> Option<String> {
+        self.claude_bearer_token
+            .lock()
+            .as_ref()
+            .and_then(|token| token.value_if_fresh(BEARER_TOKEN_TTL).map(str::to_string))
+    }
+
+    pub fn cached_claude_profile(&self) -> ClaudeAccountProfile {
+        const TTL: Duration = Duration::from_secs(300);
+
+        let current_token = self.current_bearer_token();
+
+        {
+            let cache = self.cached_claude_profile.lock();
+            if let Some((cached_token, profile, at)) = &*cache {
+                if *cached_token == current_token && at.elapsed() < TTL {
+                    return profile.clone();
+                }
+            }
+        }
+
+        let profile = pricing::detect_claude_profile_uncached(self);
+        let mut cache = self.cached_claude_profile.lock();
+        *cache = Some((current_token, profile.clone(), Instant::now()));
+        profile
+    }
+
+    /// The most recent classifier output that was something other than
+    /// `Unknown`. Used by the pricing gate to keep applying real thresholds
+    /// when a transient OAuth-profile fetch returns sparse fields and the
+    /// live classifier returns Unknown.
+    pub fn last_known_good_plan_tier(&self) -> Option<crate::models::ClaudePlanTier> {
+        self.last_known_good_plan
+            .lock()
+            .as_ref()
+            .map(|p| p.plan_tier.clone())
+    }
+
+    /// Persist a classifier result if it carries real signal. Unknown is
+    /// silently ignored — it's "we don't know yet", never an authoritative
+    /// downgrade.
+    pub fn record_known_good_plan_tier(&self, tier: &crate::models::ClaudePlanTier) {
+        if matches!(tier, crate::models::ClaudePlanTier::Unknown) {
+            return;
+        }
+        let entry = LastKnownGoodPlan {
+            plan_tier: tier.clone(),
+            recorded_at: Utc::now(),
+        };
+        {
+            let mut cache = self.last_known_good_plan.lock();
+            if let Some(existing) = cache.as_ref() {
+                // Same tier as before — skip the disk write to avoid touching
+                // the file on every classification refresh.
+                if matches!(
+                    (&existing.plan_tier, tier),
+                    (crate::models::ClaudePlanTier::Free, crate::models::ClaudePlanTier::Free)
+                        | (crate::models::ClaudePlanTier::Pro, crate::models::ClaudePlanTier::Pro)
+                        | (crate::models::ClaudePlanTier::Max5x, crate::models::ClaudePlanTier::Max5x)
+                        | (crate::models::ClaudePlanTier::Max20x, crate::models::ClaudePlanTier::Max20x)
+                ) {
+                    return;
+                }
+            }
+            *cache = Some(entry.clone());
+        }
+        persist_last_known_good_plan(&self.last_known_good_plan_path, &entry);
+    }
+
+    fn cached_headroom_stats(&self) -> Option<HeadroomDashboardStats> {
+        // Dashboard polls at 5s; a 4s TTL caused every poll to miss and
+        // re-fetch from the proxy. 12s gives at least one cache hit between
+        // dashboard refreshes while keeping session savings visibly fresh.
+        const TTL: Duration = Duration::from_secs(12);
+        let mut cache = self.cached_headroom_stats.lock();
+        if let Some((stats, at)) = cache.as_ref() {
+            if at.elapsed() < TTL {
+                return stats.clone();
+            }
+        }
+        let stats = fetch_headroom_dashboard_stats();
+        *cache = Some((stats.clone(), Instant::now()));
+        stats
+    }
+
+    fn cached_headroom_history(&self) -> Option<HeadroomSavingsHistoryResponse> {
+        // Lifetime history moves slowly — the daily/hourly buckets that drive
+        // the Home charts only change a handful of times per minute under
+        // active traffic. A 30s TTL absorbs most dashboard polls while still
+        // updating the chart's most-recent bucket within one full refresh.
+        const TTL: Duration = Duration::from_secs(30);
+        let mut cache = self.cached_headroom_history.lock();
+        if let Some((history, at)) = cache.as_ref() {
+            if at.elapsed() < TTL {
+                return history.clone();
+            }
+        }
+        let history = fetch_headroom_savings_history();
+        *cache = Some((history.clone(), Instant::now()));
+        history
+    }
+
+    fn cached_rtk_gain_summary(&self) -> Option<RtkGainSummary> {
+        const TTL: Duration = Duration::from_secs(10);
+        let mut cache = self.cached_rtk_gain_summary.lock();
+        if let Some((stats, at)) = cache.as_ref() {
+            if at.elapsed() < TTL {
+                return stats.clone();
+            }
+        }
+        let stats = self.tool_manager.rtk_gain_summary();
+        *cache = Some((stats.clone(), Instant::now()));
+        stats
+    }
+
+    fn cached_rtk_today_stats(&self) -> Option<crate::models::RtkTodayStats> {
+        const TTL: Duration = Duration::from_secs(10);
+        let mut cache = self.cached_rtk_today_stats.lock();
+        if let Some((stats, at)) = cache.as_ref() {
+            if at.elapsed() < TTL {
+                return stats.clone();
+            }
+        }
+        let stats = self.tool_manager.rtk_today_stats();
+        *cache = Some((stats.clone(), Instant::now()));
+        stats
+    }
+
+    pub fn dashboard(&self) -> DashboardState {
+        // Callers that take this read-only path (tray updater, bootstrap
+        // finalize, account activation) must NOT drain pending milestones —
+        // doing so silently consumes crossings before `get_dashboard_state`
+        // can fire the aptabase event and the in-app notification.
+        self.build_dashboard(false).0
+    }
+
+    /// Observe a batch of transformations into ActivityFacts (for feed
+    /// synthetic-event detection: new-model / daily-record / all-time-record),
+    /// persist any changes, and return the emitted synthetic events plus the
+    /// current bounded history of recent synthetic events.
+    pub fn observe_activity_from_transformations(
+        &self,
+        transformations: &[TransformationFeedEvent],
+    ) -> ActivityObservation {
+        let mut facts = self.activity_facts.lock();
+        let mut fresh: Vec<ActivityEvent> = Vec::new();
+        let mut ordered: Vec<&TransformationFeedEvent> = transformations.iter().collect();
+        // Feed arrives newest-first; observe oldest-first so records update in order.
+        ordered.sort_by(|a, b| {
+            a.timestamp
+                .clone()
+                .unwrap_or_default()
+                .cmp(&b.timestamp.clone().unwrap_or_default())
+        });
+        for transformation in ordered {
+            let observed_at = transformation
+                .timestamp
+                .as_deref()
+                .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(Utc::now);
+            fresh.extend(facts.observe_transformation(transformation, observed_at));
+        }
+
+        let _ = facts.save_if_dirty();
+        ActivityObservation { fresh }
+    }
+
+    pub fn observe_learnings_today(
+        &self,
+        patterns_today: u32,
+        project_inputs: Vec<crate::activity_facts::LearningsProjectInput>,
+        active_project_path: Option<&str>,
+    ) -> crate::models::LearningsMilestoneEvent {
+        let mut facts = self.activity_facts.lock();
+        let event = facts.observe_learnings_today(
+            patterns_today,
+            project_inputs,
+            active_project_path,
+            Utc::now(),
+        );
+        let _ = facts.save_if_dirty();
+        event
+    }
+
+    /// Scan the Claude Code project list for candidates that should be
+    /// prompted to run Train. Delegates the decision logic and bookkeeping
+    /// (fire-once for never-trained, 7-day cooldown for stale) to
+    /// `ActivityFacts::observe_train_suggestions`.
+    pub fn observe_train_suggestions(&self, projects: &[ClaudeCodeProject]) -> Vec<ActivityEvent> {
+        let mut facts = self.activity_facts.lock();
+        let events = facts.observe_train_suggestions(projects, Utc::now());
+        let _ = facts.save_if_dirty();
+        events
+    }
+
+    /// Read-only snapshot of the latest-of-kind slots. The `get_activity_feed`
+    /// IPC command wraps this straight into the response; observation runs on
+    /// a backend timer and is the sole writer.
+    pub fn activity_feed_snapshot(&self) -> crate::models::ActivityFeedSnapshot {
+        let mut snapshot = self.activity_facts.lock().activity_feed_snapshot();
+        snapshot.rtk_today = self.cached_rtk_today_stats();
+        snapshot
+    }
+
+    /// Emit a weekly recap rolling up the 7 days ending last Sunday.
+    /// Previously Monday-only; now runs on any day whose check is due so the
+    /// first launch after an upgrade catches up on last week's recap if it
+    /// was missed. Two gates: `weekly_recap_check_due` (once per 24h) and
+    /// the per-week key inside `maybe_record_weekly_recap`.
+    pub fn maybe_emit_weekly_recap(&self) -> Option<ActivityEvent> {
+        let now = Utc::now();
+        // Cheap pre-check — skip aggregation entirely if we've already
+        // checked within 24h. The callee re-checks defensively.
+        if !self.activity_facts.lock().weekly_recap_check_due(now) {
+            return None;
+        }
+
+        let today = Local::now().date_naive();
+        let recap_monday = most_recent_monday(today);
+        let start = recap_monday.checked_sub_days(chrono::Days::new(7))?;
+        let end = recap_monday.pred_opt()?;
+
+        let totals = {
+            let tracker = self.savings_tracker.lock();
+            aggregate_weekly_totals(&tracker.daily_savings, start, end)
+        };
+
+        let mut facts = self.activity_facts.lock();
+        let event = facts.maybe_record_weekly_recap(recap_monday, totals, now);
+        let _ = facts.save_if_dirty();
+        event
+    }
+
+    pub fn dashboard_with_pending_milestones(&self) -> (DashboardState, PendingMilestones) {
+        self.build_dashboard(true)
+    }
+
+    fn build_dashboard(
+        &self,
+        drain_pending_milestones: bool,
+    ) -> (DashboardState, PendingMilestones) {
+        let tools = self.tool_manager.list_tools();
+        let clients = self.cached_clients();
+        let recent_usage = self.recent_usage.lock().clone();
+        let insights = build_insights(
+            &recent_usage,
+            &clients,
+            self.tool_manager.python_runtime_installed(),
+        );
+        let (mut snapshot, mut daily_savings, mut hourly_savings) = {
+            let tracker = self.savings_tracker.lock();
+            (
+                tracker.snapshot(),
+                tracker.daily_savings(),
+                tracker.hourly_savings(),
+            )
+        };
+        let mut pending_milestones = PendingMilestones::default();
+
+        let stats = self.cached_headroom_stats();
+        let history = self.cached_headroom_history();
+
+        if let Some(stats) = stats.as_ref() {
+            if let Some((updated, updated_daily, updated_hourly, milestones)) =
+                self.record_savings_snapshot(stats, drain_pending_milestones)
+            {
+                snapshot = updated;
+                daily_savings = updated_daily;
+                hourly_savings = updated_hourly;
+                pending_milestones = milestones;
+            }
+        }
+
+        if let Some(stats) = stats.as_ref() {
+            if let Some(requests) = stats.session_requests {
+                snapshot.session_requests = requests;
+            }
+            if let Some(saved_usd) = stats.session_estimated_savings_usd {
+                snapshot.session_estimated_savings_usd = saved_usd;
+            }
+            if let Some(saved_tokens) = stats.session_estimated_tokens_saved {
+                snapshot.session_estimated_tokens_saved = saved_tokens;
+            }
+            if let Some(savings_pct) = stats.session_savings_pct {
+                snapshot.session_savings_pct = savings_pct;
+            }
+        }
+
+        if let Some(history) = history.as_ref() {
+            if let Some(saved_usd) = history.lifetime_estimated_savings_usd {
+                snapshot.lifetime_estimated_savings_usd = saved_usd;
+            }
+            if let Some(saved_tokens) = history.lifetime_estimated_tokens_saved {
+                snapshot.lifetime_estimated_tokens_saved = saved_tokens;
+            }
+            let cutoff_date = savings_history_cutoff_date();
+            let cutoff_hour = format!("{cutoff_date}T00:00");
+            daily_savings =
+                merge_daily_savings(daily_savings, history.daily_savings(), &cutoff_date);
+            hourly_savings =
+                merge_hourly_savings(hourly_savings, history.hourly_savings(), &cutoff_hour);
+        }
+
+        (
+            DashboardState {
+                app_version: env!("CARGO_PKG_VERSION").into(),
+                launch_experience: self.launch_profile.lock().launch_experience.clone(),
+                bootstrap_complete: self.tool_manager.python_runtime_installed(),
+                python_runtime_installed: self.tool_manager.python_runtime_installed(),
+                lifetime_requests: snapshot.lifetime_requests,
+                lifetime_estimated_savings_usd: snapshot.lifetime_estimated_savings_usd,
+                lifetime_estimated_tokens_saved: snapshot.lifetime_estimated_tokens_saved,
+                session_requests: snapshot.session_requests,
+                session_estimated_savings_usd: snapshot.session_estimated_savings_usd,
+                session_estimated_tokens_saved: snapshot.session_estimated_tokens_saved,
+                session_savings_pct: snapshot.session_savings_pct,
+                daily_savings,
+                hourly_savings,
+                tools,
+                clients,
+                recent_usage,
+                insights,
+            },
+            pending_milestones,
+        )
+    }
+
+    /// Cache TTL for `list_claude_code_projects`. Long enough that rapid tab
+    /// switches and pre-warms hit the cache instead of re-scanning the
+    /// projects directory. A dedicated background thread
+    /// (`spawn_claude_projects_warmer`) keeps this fresh at ~75s cadence so
+    /// most Optimize opens still avoid a cold filesystem scan.
+    /// Completed learn runs explicitly invalidate via
+    /// `invalidate_claude_code_projects_cache`, so staleness isn't a concern
+    /// for learn-driven UI updates.
+    const CLAUDE_PROJECTS_CACHE_TTL: Duration = Duration::from_secs(90);
+
+    pub fn list_claude_code_projects(&self) -> Result<Vec<ClaudeCodeProject>> {
+        if let Some(cached) = self.cached_claude_code_projects_fresh() {
+            return Ok(cached);
+        }
+        let projects = self.list_claude_code_projects_uncached()?;
+        *self.cached_claude_code_projects.lock() = Some((projects.clone(), Instant::now()));
+        Ok(projects)
+    }
+
+    fn cached_claude_code_projects_fresh(&self) -> Option<Vec<ClaudeCodeProject>> {
+        let cache = self.cached_claude_code_projects.lock();
+        if let Some((ref projects, at)) = *cache {
+            if at.elapsed() < Self::CLAUDE_PROJECTS_CACHE_TTL {
+                return Some(projects.clone());
+            }
+        }
+        None
+    }
+
+    pub fn invalidate_claude_code_projects_cache(&self) {
+        *self.cached_claude_code_projects.lock() = None;
+    }
+
+    pub fn headroom_learn_prereq_status(&self) -> HeadroomLearnPrereqStatus {
+        if let Some(cached) = self.cached_headroom_learn_prereq.lock().clone() {
+            return cached;
+        }
+        let status = crate::detect_headroom_learn_prereq_status();
+        *self.cached_headroom_learn_prereq.lock() = Some(status.clone());
+        status
+    }
+
+    pub fn invalidate_headroom_learn_prereq_cache(&self) {
+        *self.cached_headroom_learn_prereq.lock() = None;
+    }
+
+    fn list_claude_code_projects_uncached(&self) -> Result<Vec<ClaudeCodeProject>> {
+        let projects_dir = claude_projects_dir();
+        if !projects_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut grouped_projects = BTreeMap::<String, ClaudeProjectScan>::new();
+        let entries = std::fs::read_dir(&projects_dir)
+            .with_context(|| format!("reading {}", projects_dir.display()))?;
+
+        for entry in entries.filter_map(|item| item.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let folder_name = entry
+                .file_name()
+                .to_str()
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            if folder_name.is_empty() || folder_name.starts_with('.') {
+                continue;
+            }
+
+            let session_files = list_session_jsonl_files(&path);
+            if session_files.is_empty() {
+                continue;
+            }
+
+            let latest_file = session_files
+                .iter()
+                .max_by_key(|file| {
+                    std::fs::metadata(file)
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                })
+                .cloned();
+            let Some(latest_file) = latest_file else {
+                continue;
+            };
+
+            let Some(modified) = std::fs::metadata(&latest_file)
+                .and_then(|meta| meta.modified())
+                .ok()
+            else {
+                continue;
+            };
+
+            let project_path = extract_cwd_from_session_file(&latest_file)
+                .unwrap_or_else(|| decode_project_folder_name(&folder_name));
+            // Skip ghost projects: `~/.claude/projects/` holds session files
+            // for folders that have since been moved or deleted. Falling back
+            // to the raw (non-canonical) path surfaces these as live projects,
+            // triggers Train suggestions that can never resolve, and — when a
+            // ghost shares a basename with a real project — makes the Activity
+            // tile look like it's nagging about the working copy.
+            let project_path = match std::fs::canonicalize(&project_path) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(_) => continue,
+            };
+            if project_path.trim().is_empty() {
+                continue;
+            }
+            let scan = grouped_projects.entry(project_path).or_default();
+            scan.last_worked_at = scan.last_worked_at.max(Some(modified));
+            scan.add_session_files(session_files);
+        }
+
+        let mut projects = Vec::new();
+        for (project_path, scan) in grouped_projects {
+            let Some(project) = build_claude_code_project(&self.tool_manager, project_path, scan)
+            else {
+                continue;
+            };
+            projects.push(project);
+        }
+
+        projects.sort_by(|left, right| right.last_worked_at.cmp(&left.last_worked_at));
+        Ok(projects)
+    }
+
+    pub fn begin_headroom_learn_run(&self, project_path: &str) -> Result<(), String> {
+        if project_path.trim().is_empty() {
+            return Err("Select a project before running headroom learn.".into());
+        }
+        if !self.tool_manager.python_runtime_installed() {
+            return Err("Install Headroom runtime before running headroom learn.".into());
+        }
+        if !self.tool_manager.headroom_entrypoint().exists() {
+            return Err("Headroom runtime is not available yet.".into());
+        }
+        let project = Path::new(project_path);
+        if !project.exists() {
+            return Err(format!(
+                "Project path does not exist: {}",
+                project.display()
+            ));
+        }
+        if !project.is_dir() {
+            return Err(format!(
+                "Project path is not a directory: {}",
+                project.display()
+            ));
+        }
+
+        let mut state = self.headroom_learn_state.lock();
+        if state.running {
+            return Err("headroom learn is already running.".into());
+        }
+
+        state.running = true;
+        state.project_path = Some(project_path.to_string());
+        state.started_at = Some(Utc::now());
+        state.finished_at = None;
+        state.success = None;
+        state.summary = format!(
+            "Running headroom learn for {}.",
+            project
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(project_path)
+        );
+        state.error = None;
+        state.output_tail = Vec::new();
+        Ok(())
+    }
+
+    pub fn complete_headroom_learn_run(
+        &self,
+        success: bool,
+        summary: String,
+        error: Option<String>,
+        output_tail: Vec<String>,
+    ) {
+        let mut state = self.headroom_learn_state.lock();
+        state.running = false;
+        state.finished_at = Some(Utc::now());
+        state.success = Some(success);
+        state.summary = summary;
+        state.error = error;
+        state.output_tail = output_tail;
+        drop(state);
+        // A completed run rewrites CLAUDE.md / MEMORY.md and updates the learn
+        // log's mtime, so the cached project list (which depends on both) is
+        // now stale — force a fresh scan on the next read.
+        self.invalidate_claude_code_projects_cache();
+    }
+
+    pub fn headroom_learn_status(
+        &self,
+        selected_project_path: Option<&str>,
+    ) -> HeadroomLearnStatus {
+        let state = self.headroom_learn_state.lock().clone();
+
+        let current_project_path = state.project_path.clone();
+        let lookup_project_path = selected_project_path
+            .map(|path| path.to_string())
+            .or_else(|| current_project_path.clone());
+        let project_display_name = current_project_path.as_deref().map(project_display_name);
+        let last_run_at = lookup_project_path
+            .as_deref()
+            .and_then(|path| self.tool_manager.headroom_learn_last_run_at(path));
+        let started_at = state.started_at.map(|value| value.to_rfc3339());
+        let finished_at = state.finished_at.map(|value| value.to_rfc3339());
+        let elapsed_seconds = if state.running {
+            state
+                .started_at
+                .map(|started| (Utc::now() - started).num_seconds().max(0) as u64)
+        } else {
+            match (state.started_at, state.finished_at) {
+                (Some(started), Some(finished)) => {
+                    Some((finished - started).num_seconds().max(0) as u64)
+                }
+                _ => None,
+            }
+        };
+        let progress_percent = if state.running {
+            let elapsed = elapsed_seconds.unwrap_or(0) as f64;
+            (8.0 + (1.0 - (-elapsed / 36.0).exp()) * 84.0).round() as u8
+        } else if state.finished_at.is_some() {
+            100
+        } else {
+            0
+        };
+
+        HeadroomLearnStatus {
+            running: state.running,
+            project_path: current_project_path,
+            project_display_name,
+            started_at,
+            finished_at,
+            elapsed_seconds,
+            progress_percent,
+            summary: state.summary,
+            success: state.success,
+            error: state.error,
+            last_run_at,
+            output_tail: state.output_tail,
+        }
+    }
+
+    fn record_savings_snapshot(
+        &self,
+        stats: &HeadroomDashboardStats,
+        drain_pending_milestones: bool,
+    ) -> Option<(
+        SavingsTotalsSnapshot,
+        Vec<DailySavingsPoint>,
+        Vec<HourlySavingsPoint>,
+        PendingMilestones,
+    )> {
+        let mut tracker = self.savings_tracker.lock();
+        let snapshot = tracker.observe(stats)?;
+        let daily_savings = tracker.daily_savings();
+        let hourly_savings = tracker.hourly_savings();
+        let milestones = if drain_pending_milestones {
+            PendingMilestones {
+                token: tracker.take_pending_lifetime_token_milestones(),
+            }
+        } else {
+            PendingMilestones::default()
+        };
+        Some((snapshot, daily_savings, hourly_savings, milestones))
+    }
+
+    pub fn should_present_on_launch(&self) -> bool {
+        true
+    }
+
+    pub fn bootstrap_progress(&self) -> BootstrapProgress {
+        self.bootstrap_progress.lock().clone()
+    }
+
+    pub fn begin_bootstrap(&self) -> Result<(), String> {
+        let python_installed = self.tool_manager.python_runtime_installed();
+        let mut progress = self.bootstrap_progress.lock();
+        let (next, result) = begin_bootstrap_transition(&progress, python_installed);
+        *progress = next;
+        result
+    }
+
+    pub fn update_bootstrap_step(&self, step: BootstrapStepUpdate) {
+        let mut progress = self.bootstrap_progress.lock();
+        *progress = apply_bootstrap_step(&progress, step);
+    }
+
+    pub fn mark_bootstrap_proxy_starting(&self) {
+        let mut progress = self.bootstrap_progress.lock();
+        *progress = BootstrapProgress {
+            running: true,
+            complete: false,
+            failed: false,
+            current_step: "Starting Headroom".into(),
+            message: "Starting Headroom for the first time (this can take ~1-2 minutes)…".into(),
+            current_step_eta_seconds: 45,
+            overall_percent: 95,
+        };
+    }
+
+    pub fn mark_bootstrap_complete(&self) {
+        let mut progress = self.bootstrap_progress.lock();
+        *progress = bootstrap_complete_state();
+    }
+
+    pub fn mark_bootstrap_failed<S: Into<String>>(&self, message: S) {
+        let mut progress = self.bootstrap_progress.lock();
+        *progress = bootstrap_failed_state(&progress, message.into());
+    }
+
+    pub fn ensure_headroom_running(&self) -> Result<()> {
+        if !self.tool_manager.python_runtime_installed() {
+            return Ok(());
+        }
+
+        // Suppress the gate guards while a runtime upgrade is mid-validation.
+        // The post-install boot validation in `run_upgrade_with_ui` calls
+        // back into this function to bring the new venv up; if any of the
+        // three gates below fires there, we silent-Ok-exit, the post-spawn
+        // snapshot finds nothing running, and a perfectly good upgrade gets
+        // rolled back as `not_started`. Routing isn't affected: client-side
+        // configuration (`disable_client_setup`/`clear_client_setups`) is
+        // mutated by whoever asserted the gate, so Claude Code is already
+        // pointed direct-to-Anthropic regardless of whether Python is
+        // bound on :6768. After validation, `run_upgrade_with_ui` calls
+        // `stop_headroom()` if a gate is still active so we don't leave
+        // the validation Python running where the user expected it down.
+        let in_upgrade_validation = *self.runtime_upgrade_in_progress.lock();
+
+        if !in_upgrade_validation {
+            // When the pricing gate has flipped on `proxy_bypass`, Python is
+            // intentionally down — the Rust intercept is routing direct to
+            // Anthropic. Don't restart Python here; that would just defeat the
+            // gate and (via the watchdog's failure path) eventually auto-pause
+            // the runtime.
+            if self
+                .proxy_bypass
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                log::debug!("ensure_headroom_running: short-circuit (proxy_bypass active)");
+                return Ok(());
+            }
+
+            if !self.pricing_allows_optimization() {
+                self.enforce_pricing_gate();
+                self.stop_python_if_gated();
+                return Ok(());
+            }
+
+            if self.runtime_is_paused() {
+                return Ok(());
+            }
+        }
+
+        // Tear down any orphan proxy from an older desktop build BEFORE taking
+        // the lifecycle lock, since `stop_headroom` acquires the same lock.
+        // The orphan check: a proxy is reachable, but its argv is missing flags
+        // this build relies on (e.g. --log-messages, --learn). Without this we
+        // would happily reuse a v0.2.x proxy that pre-dates the Activity feed.
+        if is_headroom_proxy_reachable()
+            && !crate::tool_manager::running_proxy_matches_expected_args()
+        {
+            log::debug!(
+                "headroom proxy is reachable but its argv predates this build; restarting it"
+            );
+            self.stop_headroom();
+        }
+
+        // Serialize lifecycle transitions so launch warm-up, tray open, and the
+        // watchdog cannot race into concurrent proxy spawns before the backend
+        // port is reachable and `headroom_process` has been recorded.
+        let _lifecycle_guard = self.lifecycle_lock.lock();
+
+        // Another caller may have brought the runtime up while we waited.
+        if !self.tool_manager.python_runtime_installed() {
+            return Ok(());
+        }
+        // Same upgrade-validation suppression as above. Re-read the flag
+        // because the upgrade could have completed between the two reads
+        // (lifecycle_lock can block for the duration of another spawn).
+        if !*self.runtime_upgrade_in_progress.lock() {
+            if !self.pricing_allows_optimization() {
+                self.enforce_pricing_gate();
+                return Ok(());
+            }
+            if self.runtime_is_paused() {
+                return Ok(());
+            }
+        }
+
+        // If the proxy is already live (e.g. started externally, or by us under
+        // the lifecycle lock just above), treat runtime as healthy without
+        // forcing another launcher.
+        if is_headroom_proxy_reachable() {
+            *self.last_startup_error.lock() = None;
+            return Ok(());
+        }
+
+        {
+            let mut process = self.headroom_process.lock();
+
+            if let Some(existing) = process.as_mut() {
+                match existing.try_wait() {
+                    Ok(None) => return Ok(()),
+                    Ok(Some(_)) | Err(_) => {
+                        *process = None;
+                    }
+                }
+            }
+        } // release lock before the blocking start
+
+        self.set_runtime_starting(true);
+        let started = self.tool_manager.start_headroom_background();
+        self.set_runtime_starting(false);
+
+        match started {
+            Ok(child) => {
+                *self.headroom_process.lock() = Some(child);
+                *self.last_startup_error.lock() = None;
+                Ok(())
+            }
+            Err(err) => {
+                *self.last_startup_error.lock() = Some(format!("{err:#}"));
+                Err(err)
+            }
+        }
+    }
+
+    pub fn runtime_status(&self) -> RuntimeStatus {
+        // Multiple pollers (tray icon updater at 260ms, proxy watchdog at 5s,
+        // frontend interval at 3s, ad-hoc pre-warms) all land here and each
+        // uncached call does a blocking HTTP `/readyz` plus several file
+        // stats. A short TTL collapses them into one fetch without any
+        // perceptible staleness — the longest-cadence caller is 5s, so 2s
+        // TTL gives each poll a fresh read while deduping within bursts.
+        const TTL: Duration = Duration::from_secs(2);
+        {
+            let cache = self.cached_runtime_status.lock();
+            if let Some((status, at)) = cache.as_ref() {
+                if at.elapsed() < TTL {
+                    return status.clone();
+                }
+            }
+        }
+        let status = self.compute_runtime_status();
+        *self.cached_runtime_status.lock() = Some((status.clone(), Instant::now()));
+        status
+    }
+
+    fn compute_runtime_status(&self) -> RuntimeStatus {
+        let installed = self.tool_manager.python_runtime_installed();
+        let paused = self.runtime_is_paused();
+        let proxy_reachable = is_headroom_proxy_reachable();
+        let mcp_configured = self.tool_manager.headroom_mcp_configured();
+        let mcp_error = self.tool_manager.headroom_mcp_error();
+        let ml_installed = self.tool_manager.headroom_ml_installed();
+        let platform = current_platform();
+        let support_tier = current_platform_support_tier();
+        let headroom_learn_disabled_reason = headroom_learn_platform_message();
+        let kompress_enabled = if installed && proxy_reachable {
+            self.tool_manager.headroom_kompress_enabled()
+        } else {
+            None
+        };
+        let rtk_installed = self.tool_manager.rtk_installed();
+        let rtk_version = self.tool_manager.installed_rtk_version();
+        let (rtk_path_configured, rtk_hook_configured) =
+            rtk_integration_status().unwrap_or((false, false));
+        let rtk_gain_summary = self.cached_rtk_gain_summary();
+        let headroom_pid = {
+            let mut process = self.headroom_process.lock();
+            if let Some(existing) = process.as_mut() {
+                match existing.try_wait() {
+                    Ok(None) => Some(existing.id()),
+                    Ok(Some(_)) | Err(_) => {
+                        *process = None;
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
+
+        let effective_running = installed && !paused && proxy_reachable;
+
+        let startup_error = self.last_startup_error.lock().clone();
+        let startup_error_hint = startup_error.as_deref().and_then(classify_startup_error);
+
+        RuntimeStatus {
+            platform: platform.into(),
+            support_tier: support_tier.into(),
+            installed,
+            running: effective_running,
+            starting: self.runtime_is_starting() && !effective_running,
+            paused,
+            proxy_reachable,
+            headroom_pid,
+            mcp_configured,
+            mcp_error,
+            ml_installed,
+            kompress_enabled,
+            headroom_learn_supported: headroom_learn_disabled_reason.is_none(),
+            headroom_learn_disabled_reason,
+            startup_error,
+            startup_error_hint,
+            runtime_upgrade_failure: self.runtime_upgrade_failure(),
+            rtk: RtkRuntimeStatus {
+                installed: rtk_installed,
+                version: rtk_version,
+                path_configured: rtk_path_configured,
+                hook_configured: rtk_hook_configured,
+                total_commands: rtk_gain_summary.as_ref().map(|stats| stats.total_commands),
+                total_saved: rtk_gain_summary.as_ref().map(|stats| stats.total_saved),
+                avg_savings_pct: rtk_gain_summary.as_ref().map(|stats| stats.avg_savings_pct),
+            },
+        }
+    }
+
+    pub fn set_runtime_paused(&self, paused: bool) {
+        let mut runtime_paused = self.runtime_paused.lock();
+        *runtime_paused = paused;
+        drop(runtime_paused);
+        self.invalidate_runtime_status_cache();
+    }
+
+    pub fn runtime_is_paused(&self) -> bool {
+        *self.runtime_paused.lock()
+    }
+
+    pub fn set_runtime_starting(&self, starting: bool) {
+        let mut runtime_starting = self.runtime_starting.lock();
+        *runtime_starting = starting;
+        drop(runtime_starting);
+        self.invalidate_runtime_status_cache();
+    }
+
+    /// Drops the cached `RuntimeStatus` so the next call recomputes. Wired
+    /// into every path that mutates visible runtime state (pause, resume,
+    /// starting, upgrade phase) so user-initiated changes show up on the
+    /// tray icon and settings UI within one tray-updater tick instead of
+    /// waiting out the 2s TTL.
+    pub fn invalidate_runtime_status_cache(&self) {
+        *self.cached_runtime_status.lock() = None;
+    }
+
+    pub fn runtime_is_starting(&self) -> bool {
+        *self.runtime_starting.lock()
+    }
+
+    pub fn resume_runtime(&self) -> Result<()> {
+        self.set_runtime_paused(false);
+        // User explicitly resuming = "go back to optimizing." Clear bypass
+        // so `ensure_headroom_running` doesn't short-circuit on the bypass
+        // check (state.rs ~2247). If pricing still says we're gated, the
+        // next pricing poll will re-set bypass; if not, Python comes up
+        // and traffic flows through optimization again.
+        self.proxy_bypass
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.ensure_headroom_running()
+    }
+
+    pub fn stop_headroom(&self) {
+        let _lifecycle_guard = self.lifecycle_lock.lock();
+        self.set_runtime_starting(false);
+        let mut process = self.headroom_process.lock();
+
+        if let Some(mut child) = process.take() {
+            let pid = child.id() as i32;
+            let _ = std::process::Command::new("/bin/kill")
+                .arg("-TERM")
+                .arg(format!("-{pid}"))
+                .status();
+            let _ = child.wait();
+        }
+
+        // Also clean up detached/orphaned Headroom-managed headroom proxies
+        // so quitting the UI cannot leave the background listener behind.
+        // We deliberately drop the port number from the match pattern: the
+        // proxy may have fallen back to 6769..=6790 if 6768 was foreign-held,
+        // and the python module path / entrypoint subcommand is unique enough
+        // to identify our proxies regardless of port.
+        let managed_python = self.tool_manager.managed_python();
+        let command_patterns = [
+            format!(
+                "{} -m headroom.proxy.server",
+                managed_python.display()
+            ),
+            format!(
+                "{} proxy --port",
+                self.tool_manager.headroom_entrypoint().display()
+            ),
+        ];
+        for pattern in command_patterns {
+            if let Err(err) = kill_processes_by_command_pattern(&pattern) {
+                log::warn!("failed to clean detached headroom proxy processes: {err}");
+            }
+        }
+    }
+
+    fn pricing_allows_optimization(&self) -> bool {
+        pricing::get_pricing_status(self)
+            .map(|status| status.optimization_allowed)
+            .unwrap_or(true)
+    }
+
+    /// Flip the bypass flag based on current pricing. Safe to call while
+    /// holding `lifecycle_lock` — this never tries to acquire it. Stopping
+    /// the Python proxy is `stop_python_if_gated`'s job (it does take the
+    /// lock) and must be invoked separately.
+    ///
+    /// Does NOT touch `client-setup.json`, `~/.claude/settings.json`, or
+    /// shell blocks. Those are durable user setup, not runtime state — the
+    /// bypass flag alone is enough to make the Rust intercept pass traffic
+    /// straight through to api.anthropic.com while Python is down.
+    fn enforce_pricing_gate(&self) {
+        match pricing::get_pricing_status(self) {
+            Ok(status) if !status.optimization_allowed => {
+                self.proxy_bypass
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            Ok(_) => {
+                self.proxy_bypass
+                    .store(false, std::sync::atomic::Ordering::Release);
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Stop the Python proxy when pricing currently disallows optimization.
+    /// Acquires `lifecycle_lock`, so callers MUST NOT already hold it.
+    fn stop_python_if_gated(&self) {
+        if !self.pricing_allows_optimization() {
+            self.stop_headroom();
+        }
+    }
+
+    /// Reconcile the runtime against a freshly evaluated pricing status.
+    /// Detects gated→ungated and ungated→gated transitions and runs the
+    /// matching side-effects (start/stop the Python proxy, flip the bypass
+    /// flag). Idempotent on no-op cases — safe to call from every pricing
+    /// poll.
+    ///
+    /// The ungated→gated transition is debounced: the bypass flip only
+    /// fires once `optimization_allowed=false` has been observed for
+    /// `PRICING_GATE_DEBOUNCE_POLLS` consecutive polls. The gated→ungated
+    /// direction has no debounce — recovery should be immediate.
+    ///
+    /// Acquires `lifecycle_lock` (via `stop_headroom` / `ensure_headroom_running`),
+    /// so callers MUST NOT already hold it.
+    pub fn apply_pricing_gate_status(&self, status: &crate::models::HeadroomPricingStatus) {
+        let was_bypassed = self
+            .proxy_bypass
+            .load(std::sync::atomic::Ordering::Acquire);
+        let should_bypass = !status.optimization_allowed;
+
+        if should_bypass {
+            // Once bypassed, the streak is moot — keep it pinned at the
+            // threshold so a future gated→ungated→gated re-flip still
+            // requires a full debounce window.
+            if was_bypassed {
+                return;
+            }
+            let prev = self
+                .pricing_gate_violation_streak
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let streak = prev.saturating_add(1);
+            if streak < PRICING_GATE_DEBOUNCE_POLLS {
+                log::info!(
+                    "pricing_gate: gated reading {streak}/{PRICING_GATE_DEBOUNCE_POLLS} — debouncing before bypass flip"
+                );
+                return;
+            }
+            // Transition: ungated → gated. Flip bypass FIRST so the Rust
+            // intercept passes new requests straight through to Anthropic
+            // while we're tearing Python down — otherwise there's a window
+            // where 6767 → 6768 connect fails and Claude Code sees 502.
+            self.proxy_bypass
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.stop_headroom();
+        } else {
+            // Any ungated reading clears the violation streak so a later
+            // gated reading starts the debounce window over.
+            self.pricing_gate_violation_streak
+                .store(0, std::sync::atomic::Ordering::Release);
+            if was_bypassed {
+                // Transition: gated → ungated (e.g., user just upgraded or
+                // weekly usage rolled over). Clear bypass and bring Python
+                // back online. No client_setups restore needed — gating
+                // never tore them down.
+                self.proxy_bypass
+                    .store(false, std::sync::atomic::Ordering::Release);
+                if let Err(err) = self.ensure_headroom_running() {
+                    log::warn!(
+                        "apply_pricing_gate_status: ensure_headroom_running failed: {err:#}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Number of consecutive gated pricing polls required before flipping
+/// `proxy_bypass` on. With the React UI's 60s focused / 600s blurred poll
+/// cadence, 2 polls = 1–10 minutes minimum before a gated state takes effect.
+/// Tuned to ride out single-poll spikes (Anthropic returning a stale or
+/// momentary high utilization, transient network failures clearing auth
+/// state) without delaying real threshold crossings meaningfully.
+const PRICING_GATE_DEBOUNCE_POLLS: u32 = 2;
+
+pub(crate) fn current_platform() -> &'static str {
+    std::env::consts::OS
+}
+
+pub(crate) fn current_platform_support_tier() -> &'static str {
+    match current_platform() {
+        "linux" => "experimental",
+        _ => "stable",
+    }
+}
+
+pub(crate) fn headroom_learn_platform_message() -> Option<String> {
+    match current_platform() {
+        "linux" => Some(
+            "Headroom Learn is disabled on Linux preview builds. Core proxy routing works, but Learn and secure API key storage are not production-ready yet."
+                .into(),
+        ),
+        _ => None,
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        let mut process = self.headroom_process.lock();
+        if let Some(mut child) = process.take() {
+            let pid = child.id() as i32;
+            let _ = std::process::Command::new("/bin/kill")
+                .arg("-TERM")
+                .arg(format!("-{pid}"))
+                .status();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn user_home_dir() -> PathBuf {
+    dirs::home_dir()
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn claude_projects_dir() -> PathBuf {
+    user_home_dir().join(".claude").join("projects")
+}
+
+#[derive(Debug, Default)]
+struct ClaudeProjectScan {
+    last_worked_at: Option<std::time::SystemTime>,
+    session_files: Vec<PathBuf>,
+    seen_session_files: HashSet<PathBuf>,
+}
+
+impl ClaudeProjectScan {
+    fn add_session_files(&mut self, session_files: Vec<PathBuf>) {
+        for session_file in session_files {
+            let dedupe_key = canonical_session_file_path(&session_file);
+            if self.seen_session_files.insert(dedupe_key) {
+                self.session_files.push(session_file);
+            }
+        }
+    }
+}
+
+fn build_claude_code_project(
+    tool_manager: &ToolManager,
+    project_path: String,
+    scan: ClaudeProjectScan,
+) -> Option<ClaudeCodeProject> {
+    let last_worked_at: chrono::DateTime<Utc> = scan.last_worked_at?.into();
+    let session_count = scan.session_files.len();
+    let mut hasher = Sha256::new();
+    hasher.update(project_path.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    let id = digest[..12].to_string();
+    let display_name = Path::new(&project_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| project_path.clone());
+
+    let learn_summary = tool_manager.headroom_learn_project_summary(&project_path);
+    let last_learn_ran_at = learn_summary.last_run_at;
+    let has_persisted_learnings = learn_summary.has_persisted_learnings;
+    let last_learn_pattern_count = learn_summary.pattern_count;
+    let learn_time = last_learn_ran_at
+        .as_ref()
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .map(|ts| ts.with_timezone(&Utc));
+    let today = Utc::now().date_naive();
+    let mut days_since_learn: HashSet<chrono::NaiveDate> = HashSet::new();
+    let mut sessions_today: usize = 0;
+    for file in &scan.session_files {
+        let Ok(meta) = std::fs::metadata(file) else {
+            continue;
+        };
+        let Ok(m) = meta.modified() else {
+            continue;
+        };
+        let t: chrono::DateTime<Utc> = m.into();
+        if t.date_naive() == today {
+            sessions_today += 1;
+        }
+        if let Some(learn_time) = learn_time {
+            if t > learn_time {
+                days_since_learn.insert(t.date_naive());
+            }
+        }
+    }
+    let active_days_since_last_learn = if learn_time.is_some() {
+        days_since_learn.len()
+    } else {
+        0
+    };
+
+    Some(ClaudeCodeProject {
+        id,
+        project_path,
+        display_name,
+        last_worked_at: last_worked_at.to_rfc3339(),
+        session_count,
+        sessions_today,
+        last_learn_ran_at,
+        has_persisted_learnings,
+        active_days_since_last_learn,
+        last_learn_pattern_count,
+    })
+}
+
+fn list_session_jsonl_files(project_dir: &Path) -> Vec<PathBuf> {
+    let mut files = std::fs::read_dir(project_dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("jsonl"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+    });
+    files
+}
+
+fn canonical_session_file_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn extract_cwd_from_session_file(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    use std::io::BufRead;
+
+    for line in reader.lines().map_while(|line| line.ok()).take(300) {
+        if !line.contains("\"cwd\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(cwd) = value.get("cwd").and_then(|item| item.as_str()) {
+            if !cwd.trim().is_empty() {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn decode_project_folder_name(folder_name: &str) -> String {
+    // Claude Code's folder-name convention is lossy: it maps '/' to '-' without
+    // escaping existing hyphens, so paths like `/a/b-c` and `/a/b/c` produce the
+    // same folder. We mirror that convention here and accept the ambiguity --
+    // the primary resolver (`extract_cwd_from_session_file`) reads the real cwd
+    // from session JSONL, so this fallback only runs when that fails.
+    if !folder_name.starts_with('-') {
+        return folder_name.to_string();
+    }
+    let rebuilt = format!("/{}", folder_name.trim_start_matches('-').replace('-', "/"));
+    if rebuilt.trim().is_empty() {
+        folder_name.to_string()
+    } else {
+        rebuilt
+    }
+}
+
+fn project_display_name(project_path: &str) -> String {
+    Path::new(project_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| project_path.to_string())
+}
+
+pub fn tail_lines(text: &str, max_lines: usize) -> Vec<String> {
+    let mut lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+    if lines.len() > max_lines {
+        lines = lines.split_off(lines.len() - max_lines);
+    }
+    lines
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LaunchProfile {
+    launch_count: u64,
+    launch_experience: LaunchExperience,
+    lifetime_requests: usize,
+    lifetime_estimated_savings_usd: f64,
+    lifetime_estimated_tokens_saved: u64,
+    #[serde(default)]
+    setup_wizard_complete: bool,
+    #[serde(default)]
+    last_launched_app_version: Option<String>,
+    #[serde(default)]
+    last_runtime_upgrade_failure: Option<RuntimeUpgradeFailure>,
+}
+
+fn persist_launch_profile(path: &std::path::Path, profile: &LaunchProfile) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(profile) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+impl LaunchProfile {
+    fn load_or_create(base_dir: &std::path::Path) -> Result<(Self, std::path::PathBuf)> {
+        let path = config_file(base_dir, "launch-profile.json");
+
+        let previous = if path.exists() {
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            serde_json::from_slice::<LaunchProfile>(&bytes)
+                .with_context(|| format!("parsing {}", path.display()))?
+        } else {
+            LaunchProfile {
+                launch_count: 0,
+                launch_experience: LaunchExperience::FirstRun,
+                lifetime_requests: 0,
+                lifetime_estimated_savings_usd: 0.0,
+                lifetime_estimated_tokens_saved: 0,
+                setup_wizard_complete: false,
+                last_launched_app_version: None,
+                last_runtime_upgrade_failure: None,
+            }
+        };
+
+        let mut current = previous;
+        current.launch_count += 1;
+
+        // Migrate legacy seeded demo totals to true zero-based tracking.
+        if current.lifetime_requests == 138
+            && (current.lifetime_estimated_savings_usd - 31.72).abs() < f64::EPSILON
+            && current.lifetime_estimated_tokens_saved == 512_844
+        {
+            current.lifetime_requests = 0;
+            current.lifetime_estimated_savings_usd = 0.0;
+            current.lifetime_estimated_tokens_saved = 0;
+        }
+
+        if current.launch_count == 1 {
+            current.launch_experience = LaunchExperience::FirstRun;
+        } else {
+            current.launch_experience = LaunchExperience::Resume;
+        }
+
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&current).context("serializing launch profile")?,
+        )
+        .with_context(|| format!("writing {}", path.display()))?;
+
+        Ok((current, path))
+    }
+}
+
+/// Last classification that returned a non-Unknown tier. Persisted so the
+/// pricing gate can keep applying the right thresholds when Anthropic's
+/// OAuth profile transiently comes back sparse and the live classifier
+/// returns Unknown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LastKnownGoodPlan {
+    plan_tier: crate::models::ClaudePlanTier,
+    recorded_at: DateTime<Utc>,
+}
+
+impl LastKnownGoodPlan {
+    fn load(base_dir: &std::path::Path) -> (Option<Self>, std::path::PathBuf) {
+        let path = config_file(base_dir, "last-known-good-plan.json");
+        let value = if path.exists() {
+            std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
+        } else {
+            None
+        };
+        (value, path)
+    }
+}
+
+fn persist_last_known_good_plan(path: &std::path::Path, plan: &LastKnownGoodPlan) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(plan) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SavingsTotalsSnapshot {
+    session_requests: usize,
+    session_estimated_savings_usd: f64,
+    session_estimated_tokens_saved: u64,
+    session_savings_pct: f64,
+    lifetime_requests: usize,
+    lifetime_estimated_savings_usd: f64,
+    lifetime_estimated_tokens_saved: u64,
+}
+
+const FIRST_LIFETIME_TOKEN_MILESTONES: [u64; 3] = [100_000, 1_000_000, 5_000_000];
+const REPEATING_LIFETIME_TOKEN_MILESTONE_STEP: u64 = 10_000_000;
+
+const FIRST_LIFETIME_USD_MILESTONES: [u64; 3] = [10, 50, 100];
+const REPEATING_LIFETIME_USD_MILESTONE_STEP: u64 = 100;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct SavingsRecord {
+    /// Schema version for forward-compatibility and migration detection.
+    /// v0 = legacy (USD derived from tokens/10000)
+    /// v2 = day-scoped deltas
+    /// v3 = session-scoped deltas matching Headroom /stats
+    /// v4 = session-scoped deltas plus actual usage totals
+    /// v5 = v4 plus hour-scoped bucket keys
+    /// v6 = v5 plus spend metrics sourced from /stats actual-input fields only
+    /// v7 = v6 plus spend backfills distributed across session history
+    schema_version: u8,
+    id: String,
+    observed_at: chrono::DateTime<Utc>,
+    day_key: String,
+    hour_key: String,
+    session_requests: usize,
+    session_estimated_savings_usd: f64,
+    session_estimated_tokens_saved: u64,
+    session_actual_cost_usd: f64,
+    session_total_tokens_sent: u64,
+    delta_requests: usize,
+    delta_estimated_savings_usd: f64,
+    delta_estimated_tokens_saved: u64,
+    delta_actual_cost_usd: f64,
+    delta_total_tokens_sent: u64,
+    source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavingsObservation {
+    observed_at: chrono::DateTime<Utc>,
+    last_activity_at: Option<chrono::DateTime<Utc>>,
+    session_requests: usize,
+    session_estimated_savings_usd: f64,
+    session_estimated_tokens_saved: u64,
+    session_actual_cost_usd: f64,
+    session_total_tokens_sent: u64,
+}
+
+impl SavingsObservation {
+    fn last_activity_at(&self) -> chrono::DateTime<Utc> {
+        self.last_activity_at.unwrap_or(self.observed_at)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+struct DailySavingsBucket {
+    estimated_savings_usd: f64,
+    estimated_tokens_saved: u64,
+    actual_cost_usd: f64,
+    total_tokens_sent: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedSavingsState {
+    schema_version: u8,
+    session_requests: usize,
+    session_estimated_savings_usd: f64,
+    session_estimated_tokens_saved: u64,
+    session_savings_pct: f64,
+    lifetime_requests: usize,
+    lifetime_estimated_savings_usd: f64,
+    lifetime_estimated_tokens_saved: u64,
+    last_observation: Option<SavingsObservation>,
+    display_session_baseline: Option<SavingsObservation>,
+    session_savings_history: Vec<HeadroomSavingsHistoryPoint>,
+    session_hourly_buckets: BTreeMap<String, DailySavingsBucket>,
+    daily_savings: BTreeMap<String, DailySavingsBucket>,
+    hourly_savings: BTreeMap<String, DailySavingsBucket>,
+}
+
+struct SavingsTracker {
+    records_path: std::path::PathBuf,
+    state_path: std::path::PathBuf,
+    session_requests: usize,
+    session_estimated_savings_usd: f64,
+    session_estimated_tokens_saved: u64,
+    session_savings_pct: f64,
+    lifetime_requests: usize,
+    lifetime_estimated_savings_usd: f64,
+    lifetime_estimated_tokens_saved: u64,
+    last_observation: Option<SavingsObservation>,
+    display_session_baseline: Option<SavingsObservation>,
+    session_savings_history: Vec<HeadroomSavingsHistoryPoint>,
+    session_hourly_buckets: BTreeMap<String, DailySavingsBucket>,
+    daily_savings: BTreeMap<String, DailySavingsBucket>,
+    hourly_savings: BTreeMap<String, DailySavingsBucket>,
+    pending_lifetime_token_milestones: Vec<u64>,
+    pending_lifetime_usd_milestones: Vec<u64>,
+    // Write throttle — only flush to disk at most once per minute
+    last_written_at: Option<std::time::Instant>,
+}
+
+impl SavingsTracker {
+    fn load_or_create(base_dir: &Path) -> Result<Self> {
+        let records_path = telemetry_file(base_dir, "savings-records.jsonl");
+        let state_path = config_file(base_dir, "savings-state.json");
+        if !records_path.exists() {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&records_path)
+                .with_context(|| format!("creating {}", records_path.display()))?;
+        }
+
+        let persisted_state = load_persisted_savings_state(&state_path).ok().flatten();
+
+        let mut tracker = Self {
+            records_path,
+            state_path,
+            session_requests: 0,
+            session_estimated_savings_usd: 0.0,
+            session_estimated_tokens_saved: 0,
+            session_savings_pct: 0.0,
+            lifetime_requests: persisted_state
+                .as_ref()
+                .map_or(0, |state| state.lifetime_requests),
+            lifetime_estimated_savings_usd: persisted_state
+                .as_ref()
+                .map_or(0.0, |state| state.lifetime_estimated_savings_usd),
+            lifetime_estimated_tokens_saved: persisted_state
+                .as_ref()
+                .map_or(0, |state| state.lifetime_estimated_tokens_saved),
+            last_observation: persisted_state
+                .as_ref()
+                .and_then(|state| state.last_observation.clone()),
+            display_session_baseline: persisted_state
+                .as_ref()
+                .and_then(|state| state.display_session_baseline.clone()),
+            session_savings_history: persisted_state
+                .as_ref()
+                .map_or_else(Vec::new, |state| state.session_savings_history.clone()),
+            session_hourly_buckets: persisted_state
+                .as_ref()
+                .map_or_else(BTreeMap::new, |state| state.session_hourly_buckets.clone()),
+            daily_savings: persisted_state
+                .as_ref()
+                .map_or_else(BTreeMap::new, |state| state.daily_savings.clone()),
+            hourly_savings: persisted_state
+                .as_ref()
+                .map_or_else(BTreeMap::new, |state| state.hourly_savings.clone()),
+            pending_lifetime_token_milestones: Vec::new(),
+            pending_lifetime_usd_milestones: Vec::new(),
+            last_written_at: None,
+        };
+        tracker.persist_state()?;
+        Ok(tracker)
+    }
+
+    fn snapshot(&self) -> SavingsTotalsSnapshot {
+        let baseline = self.display_session_baseline.as_ref();
+        let session_requests = baseline.map_or(self.session_requests, |baseline| {
+            self.session_requests
+                .saturating_sub(baseline.session_requests)
+        });
+        let session_estimated_savings_usd =
+            baseline.map_or(self.session_estimated_savings_usd, |baseline| {
+                (self.session_estimated_savings_usd - baseline.session_estimated_savings_usd)
+                    .max(0.0)
+            });
+        let session_estimated_tokens_saved =
+            baseline.map_or(self.session_estimated_tokens_saved, |baseline| {
+                self.session_estimated_tokens_saved
+                    .saturating_sub(baseline.session_estimated_tokens_saved)
+            });
+        let session_savings_pct = if let Some(baseline) = baseline {
+            let total_tokens_sent = self
+                .last_observation
+                .as_ref()
+                .map(|observation| observation.session_total_tokens_sent)
+                .unwrap_or(0)
+                .saturating_sub(baseline.session_total_tokens_sent);
+            let total_before = session_estimated_tokens_saved.saturating_add(total_tokens_sent);
+            if total_before > 0 {
+                session_estimated_tokens_saved as f64 / total_before as f64 * 100.0
+            } else {
+                0.0
+            }
+        } else {
+            self.session_savings_pct
+        };
+
+        SavingsTotalsSnapshot {
+            session_requests,
+            session_estimated_savings_usd,
+            session_estimated_tokens_saved,
+            session_savings_pct,
+            lifetime_requests: self.lifetime_requests,
+            lifetime_estimated_savings_usd: self.lifetime_estimated_savings_usd,
+            lifetime_estimated_tokens_saved: self.lifetime_estimated_tokens_saved,
+        }
+    }
+
+    fn daily_savings(&self) -> Vec<DailySavingsPoint> {
+        self.daily_savings
+            .iter()
+            .map(|(date, bucket)| DailySavingsPoint {
+                date: date.clone(),
+                estimated_savings_usd: bucket.estimated_savings_usd,
+                estimated_tokens_saved: bucket.estimated_tokens_saved,
+                actual_cost_usd: bucket.actual_cost_usd,
+                total_tokens_sent: bucket.total_tokens_sent,
+            })
+            .collect()
+    }
+
+    fn hourly_savings(&self) -> Vec<HourlySavingsPoint> {
+        self.hourly_savings
+            .iter()
+            .map(|(hour, bucket)| HourlySavingsPoint {
+                hour: hour.clone(),
+                estimated_savings_usd: bucket.estimated_savings_usd,
+                estimated_tokens_saved: bucket.estimated_tokens_saved,
+                actual_cost_usd: bucket.actual_cost_usd,
+                total_tokens_sent: bucket.total_tokens_sent,
+            })
+            .collect()
+    }
+
+    fn take_pending_lifetime_token_milestones(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.pending_lifetime_token_milestones)
+    }
+
+    #[cfg(test)]
+    fn take_pending_lifetime_usd_milestones(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.pending_lifetime_usd_milestones)
+    }
+
+    fn observe(&mut self, stats: &HeadroomDashboardStats) -> Option<SavingsTotalsSnapshot> {
+        let session_tokens_saved = stats.session_estimated_tokens_saved?;
+        let session_savings_usd = stats.session_estimated_savings_usd.unwrap_or(0.0).max(0.0);
+        let session_requests = stats.session_requests.unwrap_or(0);
+        let session_total_tokens_sent = stats.session_total_tokens_sent;
+        let session_actual_cost_usd = stats.session_actual_cost_usd.map(|value| value.max(0.0));
+        let first_observation = self.last_observation.is_none();
+        let previous = self.last_observation.clone();
+        let requests_went_back = previous.as_ref().is_some_and(|prev| {
+            stats.session_requests.is_some() && session_requests < prev.session_requests
+        });
+        let reset_detected = previous.as_ref().is_some_and(|prev| {
+            session_tokens_saved < prev.session_estimated_tokens_saved
+                || session_total_tokens_sent.is_some_and(|value| {
+                    prev.session_total_tokens_sent > 0 && value < prev.session_total_tokens_sent
+                })
+                || session_actual_cost_usd.is_some_and(|value| {
+                    prev.session_actual_cost_usd > 0.0
+                        && value + 0.000_001 < prev.session_actual_cost_usd
+                })
+                || requests_went_back
+        });
+        let rollover_display_session = previous.as_ref().is_some_and(|prev| {
+            should_rollover_display_session(prev.last_activity_at(), Utc::now())
+        });
+
+        let (
+            delta_requests,
+            delta_usd,
+            delta_tokens,
+            delta_actual_cost_usd,
+            delta_total_tokens_sent,
+        ) = if let Some(prev) = previous.as_ref() {
+            if reset_detected {
+                (
+                    session_requests,
+                    session_savings_usd,
+                    session_tokens_saved,
+                    session_actual_cost_usd.unwrap_or(0.0),
+                    session_total_tokens_sent.unwrap_or(0),
+                )
+            } else {
+                (
+                    session_requests.saturating_sub(prev.session_requests),
+                    (session_savings_usd - prev.session_estimated_savings_usd).max(0.0),
+                    session_tokens_saved.saturating_sub(prev.session_estimated_tokens_saved),
+                    session_actual_cost_usd.map_or(0.0, |value| {
+                        if prev.session_actual_cost_usd > 0.0 {
+                            (value - prev.session_actual_cost_usd).max(0.0)
+                        } else {
+                            0.0
+                        }
+                    }),
+                    session_total_tokens_sent.map_or(0, |value| {
+                        if prev.session_total_tokens_sent > 0 {
+                            value.saturating_sub(prev.session_total_tokens_sent)
+                        } else {
+                            0
+                        }
+                    }),
+                )
+            }
+        } else {
+            (
+                session_requests,
+                session_savings_usd,
+                session_tokens_saved,
+                session_actual_cost_usd.unwrap_or(0.0),
+                session_total_tokens_sent.unwrap_or(0),
+            )
+        };
+        if reset_detected {
+            self.session_savings_history.clear();
+        }
+        self.session_savings_history =
+            merge_session_savings_history(&self.session_savings_history, &stats.savings_history);
+
+        let previous_session_hourly_buckets = self.session_hourly_buckets.clone();
+        let current_session_hourly_buckets =
+            derive_session_hourly_buckets(stats, &self.session_savings_history);
+        let current_session_hourly_buckets_map = current_session_hourly_buckets
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
+        let session_buckets_changed = !current_session_hourly_buckets.is_empty()
+            && current_session_hourly_buckets_map != previous_session_hourly_buckets;
+        let delta_hourly_buckets = if first_observation || reset_detected {
+            current_session_hourly_buckets.clone()
+        } else {
+            diff_hourly_buckets(
+                &previous_session_hourly_buckets,
+                &current_session_hourly_buckets,
+            )
+        };
+
+        self.session_requests = session_requests;
+        self.session_estimated_savings_usd = session_savings_usd;
+        self.session_estimated_tokens_saved = session_tokens_saved;
+        self.session_savings_pct = stats.session_savings_pct.unwrap_or(0.0);
+        if reset_detected {
+            self.display_session_baseline = None;
+        } else if rollover_display_session {
+            self.display_session_baseline = previous.clone();
+        }
+
+        let changed = delta_requests > 0
+            || delta_tokens > 0
+            || delta_total_tokens_sent > 0
+            || delta_usd > 0.000_001
+            || delta_actual_cost_usd > 0.000_001
+            || session_buckets_changed;
+        let previous_lifetime_tokens_saved = self.lifetime_estimated_tokens_saved;
+        let previous_lifetime_estimated_savings_usd = self.lifetime_estimated_savings_usd;
+        if delta_requests > 0 || delta_tokens > 0 || delta_usd > 0.0 {
+            self.lifetime_requests = self.lifetime_requests.saturating_add(delta_requests);
+            self.lifetime_estimated_savings_usd += delta_usd;
+            self.lifetime_estimated_tokens_saved = self
+                .lifetime_estimated_tokens_saved
+                .saturating_add(delta_tokens);
+        }
+        self.pending_lifetime_token_milestones
+            .extend(lifetime_token_milestones_crossed(
+                previous_lifetime_tokens_saved,
+                self.lifetime_estimated_tokens_saved,
+            ));
+        self.pending_lifetime_usd_milestones
+            .extend(lifetime_usd_milestones_crossed(
+                previous_lifetime_estimated_savings_usd,
+                self.lifetime_estimated_savings_usd,
+            ));
+
+        let baseline_hourly_buckets = if (first_observation || reset_detected)
+            && (session_requests > 0
+                || session_tokens_saved > 0
+                || session_savings_usd > 0.0
+                || session_total_tokens_sent.unwrap_or(0) > 0
+                || session_actual_cost_usd.unwrap_or(0.0) > 0.0)
+        {
+            self.ingest_hourly_buckets(&current_session_hourly_buckets);
+            current_session_hourly_buckets.clone()
+        } else {
+            Vec::new()
+        };
+        if !first_observation && !reset_detected && session_buckets_changed {
+            self.replace_session_hourly_buckets(
+                &previous_session_hourly_buckets,
+                &current_session_hourly_buckets,
+            );
+        }
+        if first_observation || reset_detected {
+            self.session_hourly_buckets = current_session_hourly_buckets_map;
+        } else if session_buckets_changed {
+            self.session_hourly_buckets = current_session_hourly_buckets_map;
+        }
+        if reset_detected && current_session_hourly_buckets.is_empty() {
+            self.session_hourly_buckets.clear();
+        }
+
+        self.last_observation = Some(SavingsObservation {
+            session_requests,
+            session_estimated_savings_usd: session_savings_usd,
+            session_estimated_tokens_saved: session_tokens_saved,
+            observed_at: Utc::now(),
+            last_activity_at: Some(if changed {
+                Utc::now()
+            } else {
+                previous
+                    .as_ref()
+                    .map(|prev| prev.last_activity_at())
+                    .unwrap_or_else(Utc::now)
+            }),
+            session_actual_cost_usd: session_actual_cost_usd.unwrap_or(
+                previous
+                    .as_ref()
+                    .map_or(0.0, |prev| prev.session_actual_cost_usd),
+            ),
+            session_total_tokens_sent: session_total_tokens_sent.unwrap_or(
+                previous
+                    .as_ref()
+                    .map_or(0, |prev| prev.session_total_tokens_sent),
+            ),
+        });
+
+        let now = std::time::Instant::now();
+        let has_any_value = session_requests > 0
+            || session_tokens_saved > 0
+            || session_savings_usd > 0.0
+            || session_total_tokens_sent.unwrap_or(0) > 0
+            || session_actual_cost_usd.unwrap_or(0.0) > 0.0;
+        let should_write = has_any_value
+            && (first_observation
+                || reset_detected
+                || (changed
+                    && self
+                        .last_written_at
+                        .map_or(true, |t| now.duration_since(t).as_secs() >= 60)));
+        if should_write {
+            self.last_written_at = Some(now);
+            if first_observation || reset_detected {
+                for record in build_hourly_backfill_records(
+                    &baseline_hourly_buckets,
+                    session_requests,
+                    session_savings_usd,
+                    session_tokens_saved,
+                    session_actual_cost_usd.unwrap_or(0.0),
+                    session_total_tokens_sent.unwrap_or(0),
+                ) {
+                    let _ = self.append_record(&record);
+                }
+            } else {
+                if baseline_hourly_buckets.is_empty()
+                    && delta_requests == 0
+                    && delta_hourly_buckets.is_empty()
+                {
+                } else if baseline_hourly_buckets.is_empty() {
+                    let record = SavingsRecord {
+                        schema_version: 7,
+                        id: Uuid::new_v4().to_string(),
+                        observed_at: Utc::now(),
+                        day_key: local_day_key(Local::now()),
+                        hour_key: local_hour_key(Local::now()),
+                        session_requests,
+                        session_estimated_savings_usd: session_savings_usd,
+                        session_estimated_tokens_saved: session_tokens_saved,
+                        session_actual_cost_usd: session_actual_cost_usd.unwrap_or(0.0),
+                        session_total_tokens_sent: session_total_tokens_sent.unwrap_or(0),
+                        delta_requests,
+                        delta_estimated_savings_usd: 0.0,
+                        delta_estimated_tokens_saved: 0,
+                        delta_actual_cost_usd: 0.0,
+                        delta_total_tokens_sent: 0,
+                        source: "headroom_dashboard".into(),
+                    };
+                    let _ = self.append_record(&record);
+                } else {
+                    for record in build_hourly_delta_records(
+                        &baseline_hourly_buckets,
+                        session_requests,
+                        session_savings_usd,
+                        session_tokens_saved,
+                        session_actual_cost_usd.unwrap_or(0.0),
+                        session_total_tokens_sent.unwrap_or(0),
+                        delta_requests,
+                    ) {
+                        let _ = self.append_record(&record);
+                    }
+                }
+            }
+        }
+        let _ = self.persist_state();
+
+        Some(self.snapshot())
+    }
+
+    fn ingest_hourly_buckets(&mut self, buckets: &[(String, DailySavingsBucket)]) {
+        for (hour_key, bucket) in buckets {
+            self.add_hourly_delta(
+                hour_key,
+                bucket.estimated_savings_usd,
+                bucket.estimated_tokens_saved,
+                bucket.actual_cost_usd,
+                bucket.total_tokens_sent,
+            );
+            self.add_daily_delta(
+                &day_key_from_hour_key(hour_key),
+                bucket.estimated_savings_usd,
+                bucket.estimated_tokens_saved,
+                bucket.actual_cost_usd,
+                bucket.total_tokens_sent,
+            );
+        }
+    }
+
+    fn replace_session_hourly_buckets(
+        &mut self,
+        previous: &BTreeMap<String, DailySavingsBucket>,
+        current: &[(String, DailySavingsBucket)],
+    ) {
+        for (hour_key, bucket) in previous {
+            self.subtract_hourly_delta(
+                hour_key,
+                bucket.estimated_savings_usd,
+                bucket.estimated_tokens_saved,
+                bucket.actual_cost_usd,
+                bucket.total_tokens_sent,
+            );
+            self.subtract_daily_delta(
+                &day_key_from_hour_key(hour_key),
+                bucket.estimated_savings_usd,
+                bucket.estimated_tokens_saved,
+                bucket.actual_cost_usd,
+                bucket.total_tokens_sent,
+            );
+        }
+        self.ingest_hourly_buckets(current);
+    }
+
+    fn add_daily_delta(
+        &mut self,
+        day_key: &str,
+        usd: f64,
+        tokens: u64,
+        actual_cost_usd: f64,
+        total_tokens_sent: u64,
+    ) {
+        if usd <= 0.0 && tokens == 0 && actual_cost_usd <= 0.0 && total_tokens_sent == 0 {
+            return;
+        }
+        let entry = self.daily_savings.entry(day_key.to_string()).or_default();
+        entry.estimated_savings_usd += usd.max(0.0);
+        entry.estimated_tokens_saved = entry.estimated_tokens_saved.saturating_add(tokens);
+        entry.actual_cost_usd += actual_cost_usd.max(0.0);
+        entry.total_tokens_sent = entry.total_tokens_sent.saturating_add(total_tokens_sent);
+    }
+
+    fn subtract_daily_delta(
+        &mut self,
+        day_key: &str,
+        usd: f64,
+        tokens: u64,
+        actual_cost_usd: f64,
+        total_tokens_sent: u64,
+    ) {
+        let mut should_remove = false;
+        if let Some(entry) = self.daily_savings.get_mut(day_key) {
+            entry.estimated_savings_usd = (entry.estimated_savings_usd - usd.max(0.0)).max(0.0);
+            entry.estimated_tokens_saved = entry.estimated_tokens_saved.saturating_sub(tokens);
+            entry.actual_cost_usd = (entry.actual_cost_usd - actual_cost_usd.max(0.0)).max(0.0);
+            entry.total_tokens_sent = entry.total_tokens_sent.saturating_sub(total_tokens_sent);
+            should_remove = entry.estimated_savings_usd <= 0.0
+                && entry.estimated_tokens_saved == 0
+                && entry.actual_cost_usd <= 0.0
+                && entry.total_tokens_sent == 0;
+        }
+        if should_remove {
+            self.daily_savings.remove(day_key);
+        }
+    }
+
+    fn add_hourly_delta(
+        &mut self,
+        hour_key: &str,
+        usd: f64,
+        tokens: u64,
+        actual_cost_usd: f64,
+        total_tokens_sent: u64,
+    ) {
+        if usd <= 0.0 && tokens == 0 && actual_cost_usd <= 0.0 && total_tokens_sent == 0 {
+            return;
+        }
+        let entry = self.hourly_savings.entry(hour_key.to_string()).or_default();
+        entry.estimated_savings_usd += usd.max(0.0);
+        entry.estimated_tokens_saved = entry.estimated_tokens_saved.saturating_add(tokens);
+        entry.actual_cost_usd += actual_cost_usd.max(0.0);
+        entry.total_tokens_sent = entry.total_tokens_sent.saturating_add(total_tokens_sent);
+    }
+
+    fn subtract_hourly_delta(
+        &mut self,
+        hour_key: &str,
+        usd: f64,
+        tokens: u64,
+        actual_cost_usd: f64,
+        total_tokens_sent: u64,
+    ) {
+        let mut should_remove = false;
+        if let Some(entry) = self.hourly_savings.get_mut(hour_key) {
+            entry.estimated_savings_usd = (entry.estimated_savings_usd - usd.max(0.0)).max(0.0);
+            entry.estimated_tokens_saved = entry.estimated_tokens_saved.saturating_sub(tokens);
+            entry.actual_cost_usd = (entry.actual_cost_usd - actual_cost_usd.max(0.0)).max(0.0);
+            entry.total_tokens_sent = entry.total_tokens_sent.saturating_sub(total_tokens_sent);
+            should_remove = entry.estimated_savings_usd <= 0.0
+                && entry.estimated_tokens_saved == 0
+                && entry.actual_cost_usd <= 0.0
+                && entry.total_tokens_sent == 0;
+        }
+        if should_remove {
+            self.hourly_savings.remove(hour_key);
+        }
+    }
+
+    fn append_record(&self, record: &SavingsRecord) -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.records_path)
+            .with_context(|| format!("opening {}", self.records_path.display()))?;
+        let serialized = serde_json::to_string(record).context("serializing savings record")?;
+        use std::io::Write;
+        file.write_all(serialized.as_bytes())
+            .with_context(|| format!("writing {}", self.records_path.display()))?;
+        file.write_all(b"\n")
+            .with_context(|| format!("writing {}", self.records_path.display()))?;
+        Ok(())
+    }
+
+    fn persisted_state(&self) -> PersistedSavingsState {
+        PersistedSavingsState {
+            schema_version: 3,
+            session_requests: self.session_requests,
+            session_estimated_savings_usd: self.session_estimated_savings_usd,
+            session_estimated_tokens_saved: self.session_estimated_tokens_saved,
+            session_savings_pct: self.session_savings_pct,
+            lifetime_requests: self.lifetime_requests,
+            lifetime_estimated_savings_usd: self.lifetime_estimated_savings_usd,
+            lifetime_estimated_tokens_saved: self.lifetime_estimated_tokens_saved,
+            last_observation: self.last_observation.clone(),
+            display_session_baseline: self.display_session_baseline.clone(),
+            session_savings_history: self.session_savings_history.clone(),
+            session_hourly_buckets: self.session_hourly_buckets.clone(),
+            daily_savings: self.daily_savings.clone(),
+            hourly_savings: self.hourly_savings.clone(),
+        }
+    }
+
+    fn persist_state(&mut self) -> Result<()> {
+        let serialized = serde_json::to_vec_pretty(&self.persisted_state())
+            .context("serializing savings state")?;
+        std::fs::write(&self.state_path, serialized)
+            .with_context(|| format!("writing {}", self.state_path.display()))?;
+        Ok(())
+    }
+}
+
+/// The Monday of the week that contains `d`, or `d` itself if it already is
+/// a Monday. Used by the weekly recap: the recap for `d` covers the 7 days
+/// ending the day before this Monday.
+fn most_recent_monday(d: chrono::NaiveDate) -> chrono::NaiveDate {
+    let days_past = d.weekday().num_days_from_monday() as u64;
+    d.checked_sub_days(chrono::Days::new(days_past))
+        .unwrap_or(d)
+}
+
+fn aggregate_weekly_totals(
+    daily_savings: &BTreeMap<String, DailySavingsBucket>,
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+) -> WeeklyTotals {
+    let start_key = start.format("%Y-%m-%d").to_string();
+    let end_key = end.format("%Y-%m-%d").to_string();
+    let mut total_tokens_saved: u64 = 0;
+    let mut total_savings_usd: f64 = 0.0;
+    let mut active_days: u32 = 0;
+    for (day_key, bucket) in daily_savings.range(start_key..=end_key) {
+        let has_activity = bucket.estimated_tokens_saved > 0 || bucket.estimated_savings_usd > 0.0;
+        if has_activity {
+            active_days += 1;
+        }
+        total_tokens_saved = total_tokens_saved.saturating_add(bucket.estimated_tokens_saved);
+        total_savings_usd += bucket.estimated_savings_usd;
+        let _ = day_key;
+    }
+    WeeklyTotals {
+        total_tokens_saved,
+        total_savings_usd,
+        active_days,
+    }
+}
+
+fn lifetime_usd_milestones_crossed(previous_usd: f64, current_usd: f64) -> Vec<u64> {
+    let previous = previous_usd.max(0.0).floor() as u64;
+    let current = current_usd.max(0.0).floor() as u64;
+    if current <= previous {
+        return Vec::new();
+    }
+
+    let mut milestones = FIRST_LIFETIME_USD_MILESTONES
+        .into_iter()
+        .filter(|threshold| previous < *threshold && current >= *threshold)
+        .collect::<Vec<_>>();
+
+    let first_repeating_index = previous / REPEATING_LIFETIME_USD_MILESTONE_STEP + 1;
+    let last_repeating_index = current / REPEATING_LIFETIME_USD_MILESTONE_STEP;
+    for index in first_repeating_index..=last_repeating_index {
+        let dollars = index.saturating_mul(REPEATING_LIFETIME_USD_MILESTONE_STEP);
+        if !milestones.contains(&dollars) {
+            milestones.push(dollars);
+        }
+    }
+
+    milestones
+}
+
+fn lifetime_token_milestones_crossed(previous_total: u64, current_total: u64) -> Vec<u64> {
+    if current_total <= previous_total {
+        return Vec::new();
+    }
+
+    let mut milestones = FIRST_LIFETIME_TOKEN_MILESTONES
+        .into_iter()
+        .filter(|threshold| previous_total < *threshold && current_total >= *threshold)
+        .collect::<Vec<_>>();
+
+    let first_repeating_index = previous_total / REPEATING_LIFETIME_TOKEN_MILESTONE_STEP + 1;
+    let last_repeating_index = current_total / REPEATING_LIFETIME_TOKEN_MILESTONE_STEP;
+    for index in first_repeating_index..=last_repeating_index {
+        milestones.push(index.saturating_mul(REPEATING_LIFETIME_TOKEN_MILESTONE_STEP));
+    }
+
+    milestones
+}
+
+fn load_persisted_savings_state(path: &Path) -> Result<Option<PersistedSavingsState>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let persisted = serde_json::from_slice::<PersistedSavingsState>(&bytes)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    if persisted.schema_version == 3 {
+        Ok(Some(persisted))
+    } else {
+        Ok(None)
+    }
+}
+
+fn build_insights(
+    recent_usage: &[UsageEvent],
+    clients: &[ClientStatus],
+    python_runtime_installed: bool,
+) -> Vec<DailyInsight> {
+    let mut insights = generate_daily_insights(recent_usage);
+
+    if !python_runtime_installed {
+        insights.push(DailyInsight {
+            id: "runtime-missing".into(),
+            category: crate::models::InsightCategory::Health,
+            severity: crate::models::InsightSeverity::Warning,
+            title: "Managed Python runtime not installed".into(),
+            recommendation:
+                "Complete bootstrap so Headroom can be installed into Headroom-managed storage."
+                    .into(),
+            evidence:
+                "Headroom keeps the initial app download small and installs tools after first launch."
+                    .into(),
+            related_workspace: None,
+        });
+    }
+
+    if clients.iter().all(|client| !client.installed) {
+        insights.push(DailyInsight {
+            id: "clients-missing".into(),
+            category: crate::models::InsightCategory::Workflow,
+            severity: crate::models::InsightSeverity::Info,
+            title: "No supported clients detected yet".into(),
+            recommendation:
+                "Install a supported client to start routing requests through Headroom.".into(),
+            evidence: "Client adapters look for known local executables during startup.".into(),
+            related_workspace: None,
+        });
+    }
+
+    insights
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+struct HeadroomSavingsHistoryPoint {
+    timestamp: chrono::DateTime<Utc>,
+    total_tokens_saved: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+struct HeadroomDashboardStats {
+    session_requests: Option<usize>,
+    session_estimated_savings_usd: Option<f64>,
+    session_estimated_tokens_saved: Option<u64>,
+    session_savings_pct: Option<f64>,
+    session_actual_cost_usd: Option<f64>,
+    session_total_tokens_sent: Option<u64>,
+    savings_history: Vec<HeadroomSavingsHistoryPoint>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct HeadroomSavingsRollupPoint {
+    timestamp: chrono::DateTime<Utc>,
+    tokens_saved: u64,
+    compression_savings_usd_delta: f64,
+    total_input_tokens_delta: u64,
+    total_input_cost_usd_delta: f64,
+}
+
+#[derive(Debug, Default, Clone)]
+struct HeadroomSavingsHistoryResponse {
+    lifetime_estimated_savings_usd: Option<f64>,
+    lifetime_estimated_tokens_saved: Option<u64>,
+    hourly: Vec<HeadroomSavingsRollupPoint>,
+    daily: Vec<HeadroomSavingsRollupPoint>,
+}
+
+impl HeadroomSavingsHistoryResponse {
+    fn daily_savings(&self) -> Vec<DailySavingsPoint> {
+        self.daily
+            .iter()
+            .map(|point| DailySavingsPoint {
+                date: local_day_key(point.timestamp.with_timezone(&Local)),
+                estimated_savings_usd: point.compression_savings_usd_delta,
+                estimated_tokens_saved: point.tokens_saved,
+                actual_cost_usd: point.total_input_cost_usd_delta,
+                total_tokens_sent: point.total_input_tokens_delta,
+            })
+            .collect()
+    }
+
+    fn hourly_savings(&self) -> Vec<HourlySavingsPoint> {
+        self.hourly
+            .iter()
+            .map(|point| HourlySavingsPoint {
+                hour: local_hour_key(point.timestamp.with_timezone(&Local)),
+                estimated_savings_usd: point.compression_savings_usd_delta,
+                estimated_tokens_saved: point.tokens_saved,
+                actual_cost_usd: point.total_input_cost_usd_delta,
+                total_tokens_sent: point.total_input_tokens_delta,
+            })
+            .collect()
+    }
+}
+
+fn fetch_headroom_dashboard_stats() -> Option<HeadroomDashboardStats> {
+    if !is_headroom_proxy_reachable() {
+        return None;
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .ok()?;
+
+    let hosts = ["127.0.0.1", "localhost"];
+
+    for host in hosts {
+        let url = format!("http://{host}:6767/stats");
+        let response = match client.get(&url).send() {
+            Ok(response) if response.status().is_success() => response,
+            _ => continue,
+        };
+
+        let body = match response.text() {
+            Ok(body) => body,
+            Err(_) => continue,
+        };
+
+        if let Some(parsed) = parse_headroom_stats_from_json(&body) {
+            return Some(parsed);
+        }
+    }
+
+    None
+}
+
+fn fetch_headroom_savings_history() -> Option<HeadroomSavingsHistoryResponse> {
+    if !is_headroom_proxy_reachable() {
+        return None;
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .ok()?;
+
+    let hosts = ["127.0.0.1", "localhost"];
+
+    for host in hosts {
+        let url = format!("http://{host}:6767/stats-history");
+        let response = match client.get(&url).send() {
+            Ok(response) if response.status().is_success() => response,
+            _ => continue,
+        };
+
+        let body = match response.text() {
+            Ok(body) => body,
+            Err(_) => continue,
+        };
+
+        if let Some(parsed) = parse_headroom_stats_history_from_json(&body) {
+            return Some(parsed);
+        }
+    }
+
+    None
+}
+
+fn parse_headroom_stats_from_json(body: &str) -> Option<HeadroomDashboardStats> {
+    let root = serde_json::from_str::<Value>(body).ok()?;
+
+    let path_requests = value_at_path_u64(&root, &["requests", "total"])
+        .and_then(|value| usize::try_from(value).ok());
+    let path_tokens = value_at_path_u64(&root, &["tokens", "saved"])
+        .or_else(|| value_at_path_u64(&root, &["tokens", "compression_saved"]))
+        .or_else(|| value_at_path_u64(&root, &["compression", "tokens_saved"]));
+    let path_usd = value_at_path_f64(&root, &["cost", "compression_savings_usd"])
+        .or_else(|| value_at_path_f64(&root, &["cost", "compression_saved_usd"]))
+        .or_else(|| value_at_path_f64(&root, &["compression", "savings_usd"]));
+    let path_actual_cost_usd = value_at_path_f64(&root, &["cost", "total_input_cost_usd"])
+        .or_else(|| value_at_path_f64(&root, &["cost", "cost_with_headroom_usd"]))
+        .or_else(|| value_at_path_f64(&root, &["cost", "actual_input_cost_usd"]))
+        .or_else(|| value_at_path_f64(&root, &["cost", "input_actual_cost_usd"]))
+        .or_else(|| value_at_path_f64(&root, &["cost", "input_cost_usd"]))
+        .or_else(|| value_at_path_f64(&root, &["cost", "actual_cost_usd"]))
+        .or_else(|| value_at_path_f64(&root, &["cost", "actual_usd"]))
+        .or_else(|| value_at_path_f64(&root, &["cost", "actual_input_usd"]));
+    let path_savings_pct = value_at_path_f64(&root, &["tokens", "savings_percent"]);
+    let requests = path_requests.or_else(|| {
+        find_u64_key_recursive(
+            &root,
+            &["total_requests", "totalRequests", "requests_total"],
+        )
+        .and_then(|value| usize::try_from(value).ok())
+    });
+
+    let tokens = path_tokens.or_else(|| {
+        find_u64_key_recursive(
+            &root,
+            &[
+                "compressionTokensSaved",
+                "compression_tokens_saved",
+                "totalCompressionTokensSaved",
+                "total_compression_tokens_saved",
+            ],
+        )
+    });
+
+    let usd = path_usd.or_else(|| {
+        find_f64_key_recursive(
+            &root,
+            &[
+                "compressionSavingsUsd",
+                "compression_savings_usd",
+                "compressionSavedUsd",
+                "compression_saved_usd",
+                "compressionCostSavedUsd",
+                "compression_cost_saved_usd",
+            ],
+        )
+    });
+    let total_before_compression =
+        value_at_path_u64(&root, &["tokens", "total_before_compression"]).or_else(|| {
+            find_u64_key_recursive(
+                &root,
+                &["totalBeforeCompression", "total_before_compression"],
+            )
+        });
+    let session_savings_pct = path_savings_pct.or_else(|| {
+        total_before_compression.and_then(|total_before| {
+            tokens.and_then(|saved| {
+                if total_before > 0 {
+                    Some(saved as f64 / total_before as f64 * 100.0)
+                } else {
+                    None
+                }
+            })
+        })
+    });
+    let total_after_compression = value_at_path_u64(&root, &["tokens", "input"])
+        .or_else(|| value_at_path_u64(&root, &["cost", "total_input_tokens"]))
+        .or_else(|| value_at_path_u64(&root, &["tokens", "actual_input_tokens"]))
+        .or_else(|| value_at_path_u64(&root, &["tokens", "input_tokens"]))
+        .or_else(|| value_at_path_u64(&root, &["tokens", "total_after_compression"]))
+        .or_else(|| value_at_path_u64(&root, &["tokens", "after_compression"]))
+        .or_else(|| value_at_path_u64(&root, &["tokens", "sent"]))
+        .or_else(|| {
+            find_u64_key_recursive(
+                &root,
+                &[
+                    "actualInputTokens",
+                    "actual_input_tokens",
+                    "totalInputTokens",
+                    "total_input_tokens",
+                    "inputTokens",
+                    "input_tokens",
+                    "totalAfterCompression",
+                    "total_after_compression",
+                    "tokensSent",
+                    "tokens_sent",
+                    "totalTokensSent",
+                    "total_tokens_sent",
+                ],
+            )
+        });
+    let session_total_tokens_sent = total_after_compression.filter(|value| *value > 0);
+    let actual_cost_usd = path_actual_cost_usd.or_else(|| {
+        find_f64_key_recursive(
+            &root,
+            &[
+                "totalInputCostUsd",
+                "total_input_cost_usd",
+                "costWithHeadroomUsd",
+                "cost_with_headroom_usd",
+                "actualInputCostUsd",
+                "actual_input_cost_usd",
+                "inputActualCostUsd",
+                "input_actual_cost_usd",
+                "inputCostUsd",
+                "input_cost_usd",
+                "actualCostUsd",
+                "actual_cost_usd",
+                "actualUsd",
+                "actual_usd",
+                "actualInputUsd",
+                "actual_input_usd",
+            ],
+        )
+    });
+    let savings_history = value_at_path(&root, &["compression_savings_history"])
+        .or_else(|| value_at_path(&root, &["compression", "savings_history"]))
+        .or_else(|| value_at_path(&root, &["savings_history"]))
+        .and_then(parse_savings_history)
+        .unwrap_or_default();
+
+    if requests.is_none()
+        && tokens.is_none()
+        && usd.is_none()
+        && session_total_tokens_sent.is_none()
+        && actual_cost_usd.is_none()
+    {
+        None
+    } else {
+        Some(HeadroomDashboardStats {
+            session_requests: requests,
+            session_estimated_savings_usd: usd,
+            session_estimated_tokens_saved: tokens,
+            session_savings_pct,
+            session_actual_cost_usd: actual_cost_usd.map(|value| value.max(0.0)),
+            session_total_tokens_sent,
+            savings_history,
+        })
+    }
+}
+
+fn parse_headroom_stats_history_from_json(body: &str) -> Option<HeadroomSavingsHistoryResponse> {
+    let root = serde_json::from_str::<Value>(body).ok()?;
+    let lifetime_estimated_tokens_saved = value_at_path_u64(&root, &["lifetime", "tokens_saved"]);
+    let lifetime_estimated_savings_usd =
+        value_at_path_f64(&root, &["lifetime", "compression_savings_usd"]);
+    let hourly = value_at_path(&root, &["series", "hourly"])
+        .and_then(parse_savings_rollup_series)
+        .unwrap_or_default();
+    let daily = value_at_path(&root, &["series", "daily"])
+        .and_then(parse_savings_rollup_series)
+        .unwrap_or_default();
+
+    if lifetime_estimated_tokens_saved.is_none()
+        && lifetime_estimated_savings_usd.is_none()
+        && hourly.is_empty()
+        && daily.is_empty()
+    {
+        None
+    } else {
+        Some(HeadroomSavingsHistoryResponse {
+            lifetime_estimated_savings_usd: lifetime_estimated_savings_usd
+                .map(|value| value.max(0.0)),
+            lifetime_estimated_tokens_saved,
+            hourly,
+            daily,
+        })
+    }
+}
+
+fn value_at_path_u64(root: &Value, path: &[&str]) -> Option<u64> {
+    let value = value_at_path(root, path)?;
+    parse_u64_value(value)
+}
+
+fn value_at_path_f64(root: &Value, path: &[&str]) -> Option<f64> {
+    let value = value_at_path(root, path)?;
+    parse_f64_value(value)
+}
+
+fn value_at_path<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = root;
+    for segment in path {
+        match current {
+            Value::Object(map) => {
+                current = map.get(*segment)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+fn parse_savings_history(value: &Value) -> Option<Vec<HeadroomSavingsHistoryPoint>> {
+    let Value::Array(items) = value else {
+        return None;
+    };
+    let points = items
+        .iter()
+        .filter_map(parse_savings_history_point)
+        .collect::<Vec<_>>();
+    Some(points)
+}
+
+fn parse_savings_rollup_series(value: &Value) -> Option<Vec<HeadroomSavingsRollupPoint>> {
+    let Value::Array(items) = value else {
+        return None;
+    };
+    let points = items
+        .iter()
+        .filter_map(parse_savings_rollup_point)
+        .collect::<Vec<_>>();
+    Some(points)
+}
+
+fn parse_savings_history_point(value: &Value) -> Option<HeadroomSavingsHistoryPoint> {
+    match value {
+        Value::Array(items) if items.len() >= 2 => {
+            let timestamp = items.first()?.as_str().and_then(parse_history_timestamp)?;
+            let total_tokens_saved = parse_u64_value(items.get(1)?)?;
+            Some(HeadroomSavingsHistoryPoint {
+                timestamp,
+                total_tokens_saved,
+            })
+        }
+        Value::Object(map) => {
+            let timestamp = map
+                .get("timestamp")
+                .and_then(|value| value.as_str())
+                .and_then(parse_history_timestamp)?;
+            let total_tokens_saved = map
+                .get("total_tokens_saved")
+                .or_else(|| map.get("tokens_saved"))
+                .and_then(parse_u64_value)?;
+            Some(HeadroomSavingsHistoryPoint {
+                timestamp,
+                total_tokens_saved,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_savings_rollup_point(value: &Value) -> Option<HeadroomSavingsRollupPoint> {
+    let Value::Object(map) = value else {
+        return None;
+    };
+
+    let timestamp = map
+        .get("timestamp")
+        .and_then(|value| value.as_str())
+        .and_then(parse_history_timestamp)?;
+
+    Some(HeadroomSavingsRollupPoint {
+        timestamp,
+        tokens_saved: map
+            .get("tokens_saved")
+            .and_then(parse_u64_value)
+            .unwrap_or_default(),
+        compression_savings_usd_delta: map
+            .get("compression_savings_usd_delta")
+            .and_then(parse_f64_value)
+            .unwrap_or_default()
+            .max(0.0),
+        total_input_tokens_delta: map
+            .get("total_input_tokens_delta")
+            .and_then(parse_u64_value)
+            .unwrap_or_default(),
+        total_input_cost_usd_delta: map
+            .get("total_input_cost_usd_delta")
+            .and_then(parse_f64_value)
+            .unwrap_or_default()
+            .max(0.0),
+    })
+}
+
+fn parse_history_timestamp(text: &str) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f")
+                .ok()
+                .and_then(|timestamp| Local.from_local_datetime(&timestamp).single())
+                .map(|timestamp| timestamp.with_timezone(&Utc))
+        })
+}
+
+fn local_day_key(timestamp: chrono::DateTime<Local>) -> String {
+    timestamp.format("%Y-%m-%d").to_string()
+}
+
+// Boundary between local tracker (pre-cutoff, authoritative) and /stats-history
+// (cutoff and later, authoritative). Release builds pin to the date the schema
+// stabilized; debug builds track "today" so dev sessions never fall behind the
+// history source while iterating.
+fn savings_history_cutoff_date() -> String {
+    if cfg!(debug_assertions) {
+        local_day_key(Local::now())
+    } else {
+        "2026-06-02".to_string()
+    }
+}
+
+fn local_hour_key(timestamp: chrono::DateTime<Local>) -> String {
+    timestamp.format("%Y-%m-%dT%H:00").to_string()
+}
+
+fn day_key_from_hour_key(hour_key: &str) -> String {
+    hour_key.split('T').next().unwrap_or(hour_key).to_string()
+}
+
+fn should_rollover_display_session(
+    last_activity_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    let last_local = last_activity_at.with_timezone(&Local);
+    let now_local = now.with_timezone(&Local);
+    now_local.date_naive() > last_local.date_naive()
+        && now.signed_duration_since(last_activity_at) >= chrono::Duration::hours(1)
+}
+
+fn derive_session_buckets_with_key<F>(
+    stats: &HeadroomDashboardStats,
+    history: &[HeadroomSavingsHistoryPoint],
+    bucket_key_for_timestamp: F,
+) -> Vec<(String, DailySavingsBucket)>
+where
+    F: Fn(chrono::DateTime<Local>) -> String,
+{
+    let total_tokens = stats.session_estimated_tokens_saved.unwrap_or(0);
+    let total_usd = stats.session_estimated_savings_usd.unwrap_or(0.0).max(0.0);
+    let total_tokens_sent = stats.session_total_tokens_sent.unwrap_or(0);
+    let total_actual_cost_usd = stats.session_actual_cost_usd.unwrap_or(0.0).max(0.0);
+    if total_tokens == 0
+        && total_usd <= 0.0
+        && total_tokens_sent == 0
+        && total_actual_cost_usd <= 0.0
+    {
+        return Vec::new();
+    }
+
+    let mut buckets = BTreeMap::<String, DailySavingsBucket>::new();
+    let Some(first_point) = history.first().copied() else {
+        return Vec::new();
+    };
+    let mut previous_total = first_point.total_tokens_saved;
+    let mut history_total = 0u64;
+
+    for point in history.iter().copied().skip(1) {
+        let delta_tokens = point.total_tokens_saved.saturating_sub(previous_total);
+        previous_total = point.total_tokens_saved;
+        if delta_tokens == 0 {
+            continue;
+        }
+        history_total = history_total.saturating_add(delta_tokens);
+        let bucket_key = bucket_key_for_timestamp(point.timestamp.with_timezone(&Local));
+        let entry = buckets.entry(bucket_key).or_default();
+        entry.estimated_tokens_saved = entry.estimated_tokens_saved.saturating_add(delta_tokens);
+    }
+
+    if buckets.is_empty() || history_total == 0 || history_total > total_tokens {
+        return Vec::new();
+    }
+
+    if total_tokens > 0 && total_usd > 0.0 {
+        let usd_per_token = total_usd / total_tokens as f64;
+        for bucket in buckets.values_mut() {
+            bucket.estimated_savings_usd = bucket.estimated_tokens_saved as f64 * usd_per_token;
+        }
+    }
+
+    if total_tokens > 0 && total_tokens_sent > 0 {
+        let keys = buckets.keys().cloned().collect::<Vec<_>>();
+        for key in keys.iter() {
+            let bucket = buckets.get_mut(key).expect("bucket exists");
+            bucket.total_tokens_sent = ((bucket.estimated_tokens_saved as u128
+                * total_tokens_sent as u128)
+                / total_tokens as u128) as u64;
+        }
+    }
+
+    if total_tokens > 0 && total_actual_cost_usd > 0.0 {
+        let keys = buckets.keys().cloned().collect::<Vec<_>>();
+        for key in keys.iter() {
+            let bucket = buckets.get_mut(key).expect("bucket exists");
+            bucket.actual_cost_usd = total_actual_cost_usd
+                * (bucket.estimated_tokens_saved as f64 / total_tokens as f64);
+        }
+    }
+
+    buckets.into_iter().collect()
+}
+
+fn merge_session_savings_history(
+    existing: &[HeadroomSavingsHistoryPoint],
+    incoming: &[HeadroomSavingsHistoryPoint],
+) -> Vec<HeadroomSavingsHistoryPoint> {
+    let mut merged = BTreeMap::new();
+    for point in existing.iter().chain(incoming.iter()) {
+        merged
+            .entry(point.timestamp)
+            .and_modify(|value: &mut u64| *value = (*value).max(point.total_tokens_saved))
+            .or_insert(point.total_tokens_saved);
+    }
+
+    let mut normalized = Vec::with_capacity(merged.len());
+    let mut previous_total = 0u64;
+    for (timestamp, total_tokens_saved) in merged {
+        if !normalized.is_empty() && total_tokens_saved < previous_total {
+            continue;
+        }
+        previous_total = total_tokens_saved;
+        normalized.push(HeadroomSavingsHistoryPoint {
+            timestamp,
+            total_tokens_saved,
+        });
+    }
+    normalized
+}
+
+fn derive_session_hourly_buckets(
+    stats: &HeadroomDashboardStats,
+    history: &[HeadroomSavingsHistoryPoint],
+) -> Vec<(String, DailySavingsBucket)> {
+    derive_session_buckets_with_key(stats, history, local_hour_key)
+}
+
+fn diff_hourly_buckets(
+    previous: &BTreeMap<String, DailySavingsBucket>,
+    current: &[(String, DailySavingsBucket)],
+) -> Vec<(String, DailySavingsBucket)> {
+    current
+        .iter()
+        .filter_map(|(hour_key, bucket)| {
+            let prior = previous.get(hour_key).copied().unwrap_or_default();
+            let delta = DailySavingsBucket {
+                estimated_savings_usd: (bucket.estimated_savings_usd - prior.estimated_savings_usd)
+                    .max(0.0),
+                estimated_tokens_saved: bucket
+                    .estimated_tokens_saved
+                    .saturating_sub(prior.estimated_tokens_saved),
+                actual_cost_usd: (bucket.actual_cost_usd - prior.actual_cost_usd).max(0.0),
+                total_tokens_sent: bucket
+                    .total_tokens_sent
+                    .saturating_sub(prior.total_tokens_sent),
+            };
+            if delta.estimated_savings_usd <= 0.0
+                && delta.estimated_tokens_saved == 0
+                && delta.actual_cost_usd <= 0.0
+                && delta.total_tokens_sent == 0
+            {
+                None
+            } else {
+                Some((hour_key.clone(), delta))
+            }
+        })
+        .collect()
+}
+
+fn build_hourly_backfill_records(
+    buckets: &[(String, DailySavingsBucket)],
+    session_requests: usize,
+    session_savings_usd: f64,
+    session_tokens_saved: u64,
+    session_actual_cost_usd: f64,
+    session_total_tokens_sent: u64,
+) -> Vec<SavingsRecord> {
+    if buckets.is_empty() {
+        return vec![SavingsRecord {
+            schema_version: 7,
+            id: Uuid::new_v4().to_string(),
+            observed_at: Utc::now(),
+            day_key: local_day_key(Local::now()),
+            hour_key: local_hour_key(Local::now()),
+            session_requests,
+            session_estimated_savings_usd: session_savings_usd,
+            session_estimated_tokens_saved: session_tokens_saved,
+            session_actual_cost_usd,
+            session_total_tokens_sent,
+            delta_requests: session_requests,
+            delta_estimated_savings_usd: 0.0,
+            delta_estimated_tokens_saved: 0,
+            delta_actual_cost_usd: 0.0,
+            delta_total_tokens_sent: 0,
+            source: "headroom_dashboard_backfill".into(),
+        }];
+    }
+
+    let latest_index = buckets.len() - 1;
+    buckets
+        .iter()
+        .enumerate()
+        .map(|(index, (hour_key, bucket))| SavingsRecord {
+            schema_version: 7,
+            id: Uuid::new_v4().to_string(),
+            observed_at: Utc::now(),
+            day_key: day_key_from_hour_key(hour_key),
+            hour_key: hour_key.clone(),
+            session_requests: if index == latest_index {
+                session_requests
+            } else {
+                0
+            },
+            session_estimated_savings_usd: if index == latest_index {
+                session_savings_usd
+            } else {
+                0.0
+            },
+            session_estimated_tokens_saved: if index == latest_index {
+                session_tokens_saved
+            } else {
+                0
+            },
+            session_actual_cost_usd: if index == latest_index {
+                session_actual_cost_usd
+            } else {
+                0.0
+            },
+            session_total_tokens_sent: if index == latest_index {
+                session_total_tokens_sent
+            } else {
+                0
+            },
+            delta_requests: if index == latest_index {
+                session_requests
+            } else {
+                0
+            },
+            delta_estimated_savings_usd: bucket.estimated_savings_usd,
+            delta_estimated_tokens_saved: bucket.estimated_tokens_saved,
+            delta_actual_cost_usd: bucket.actual_cost_usd,
+            delta_total_tokens_sent: bucket.total_tokens_sent,
+            source: "headroom_dashboard_backfill".into(),
+        })
+        .collect()
+}
+
+fn build_hourly_delta_records(
+    buckets: &[(String, DailySavingsBucket)],
+    session_requests: usize,
+    session_savings_usd: f64,
+    session_tokens_saved: u64,
+    session_actual_cost_usd: f64,
+    session_total_tokens_sent: u64,
+    delta_requests: usize,
+) -> Vec<SavingsRecord> {
+    if buckets.is_empty() {
+        return Vec::new();
+    }
+
+    let latest_index = buckets.len() - 1;
+    buckets
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, bucket))| bucket.actual_cost_usd > 0.0)
+        .map(|(index, (hour_key, bucket))| SavingsRecord {
+            schema_version: 7,
+            id: Uuid::new_v4().to_string(),
+            observed_at: Utc::now(),
+            day_key: day_key_from_hour_key(hour_key),
+            hour_key: hour_key.clone(),
+            session_requests: if index == latest_index {
+                session_requests
+            } else {
+                0
+            },
+            session_estimated_savings_usd: if index == latest_index {
+                session_savings_usd
+            } else {
+                0.0
+            },
+            session_estimated_tokens_saved: if index == latest_index {
+                session_tokens_saved
+            } else {
+                0
+            },
+            session_actual_cost_usd: if index == latest_index {
+                session_actual_cost_usd
+            } else {
+                0.0
+            },
+            session_total_tokens_sent: if index == latest_index {
+                session_total_tokens_sent
+            } else {
+                0
+            },
+            delta_requests: if index == latest_index {
+                delta_requests
+            } else {
+                0
+            },
+            delta_estimated_savings_usd: bucket.estimated_savings_usd,
+            delta_estimated_tokens_saved: bucket.estimated_tokens_saved,
+            delta_actual_cost_usd: bucket.actual_cost_usd,
+            delta_total_tokens_sent: bucket.total_tokens_sent,
+            source: "headroom_dashboard".into(),
+        })
+        .collect()
+}
+
+fn find_u64_key_recursive(value: &Value, keys: &[&str]) -> Option<u64> {
+    match value {
+        Value::Object(map) => {
+            for (key, v) in map {
+                if keys
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                {
+                    if let Some(parsed) = parse_u64_value(v) {
+                        return Some(parsed);
+                    }
+                }
+                if let Some(found) = find_u64_key_recursive(v, keys) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| find_u64_key_recursive(item, keys)),
+        _ => None,
+    }
+}
+
+fn find_f64_key_recursive(value: &Value, keys: &[&str]) -> Option<f64> {
+    match value {
+        Value::Object(map) => {
+            for (key, v) in map {
+                if keys
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                {
+                    if let Some(parsed) = parse_f64_value(v) {
+                        return Some(parsed);
+                    }
+                }
+                if let Some(found) = find_f64_key_recursive(v, keys) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| find_f64_key_recursive(item, keys)),
+        _ => None,
+    }
+}
+
+fn parse_u64_value(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(num) => num
+            .as_u64()
+            .or_else(|| {
+                num.as_i64()
+                    .and_then(|v| if v >= 0 { Some(v as u64) } else { None })
+            })
+            .or_else(|| {
+                num.as_f64()
+                    .and_then(|v| if v >= 0.0 { Some(v as u64) } else { None })
+            }),
+        Value::String(text) => parse_u64_from_text(text),
+        _ => None,
+    }
+}
+
+fn parse_f64_value(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(num) => num.as_f64(),
+        Value::String(text) => parse_f64_from_text(text),
+        _ => None,
+    }
+}
+
+fn parse_u64_from_text(text: &str) -> Option<u64> {
+    let mut numeric = String::new();
+    let mut started = false;
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            numeric.push(ch);
+            started = true;
+            continue;
+        }
+        if started && (ch == ',' || ch == '_') {
+            continue;
+        }
+        if started {
+            break;
+        }
+    }
+    if numeric.is_empty() {
+        None
+    } else {
+        numeric.parse::<u64>().ok()
+    }
+}
+
+fn parse_f64_from_text(text: &str) -> Option<f64> {
+    let mut numeric = String::new();
+    let mut started = false;
+    for ch in text.chars() {
+        let is_numeric = ch.is_ascii_digit() || ch == '.' || ch == '-';
+        if is_numeric {
+            numeric.push(ch);
+            started = true;
+            continue;
+        }
+        if started && (ch == ',' || ch == '_' || ch == '$' || ch.is_ascii_whitespace()) {
+            continue;
+        }
+        if started {
+            break;
+        }
+    }
+    if numeric.is_empty() || numeric == "-" || numeric == "." {
+        None
+    } else {
+        numeric.parse::<f64>().ok()
+    }
+}
+
+pub(crate) fn headroom_proxy_reachable() -> bool {
+    is_headroom_proxy_reachable()
+}
+
+/// Turn a raw `last_startup_error` string (the anyhow chain from
+/// `start_headroom_background`) into a short user-friendly explanation plus a
+/// suggested next step. Returns `None` for shapes we don't recognize, in which
+/// case the UI falls back to a generic "open logs" prompt.
+pub(crate) fn classify_startup_error(raw: &str) -> Option<String> {
+    if raw.contains("is occupied by a non-headroom process") {
+        // Only reaches here when even the fallback port range was unavailable
+        // (`tool_manager` scans 6768..=6790 before bailing). At that point the
+        // user has 23 unrelated daemons in that range — a reboot is the only
+        // realistic remediation, since common offenders like rapportd reset
+        // their port at login.
+        return Some(
+            "A port Headroom needs is held by another app on your machine. \
+             Reboot to clear stuck listeners, then relaunch Headroom."
+                .into(),
+        );
+    }
+    if raw.contains("headroom proxy already running on port") {
+        return Some(
+            "A previous Headroom proxy is still running in the background. \
+             Quit and relaunch Headroom to reset it."
+                .into(),
+        );
+    }
+    if raw.contains("never opened port") {
+        return Some(
+            "The Headroom runtime took too long to start. \
+             On first launch, macOS Gatekeeper can scan the bundled Python runtime for ~1-2 minutes. \
+             Wait a moment and click Retry. If it keeps failing, open Headroom logs from Settings."
+                .into(),
+        );
+    }
+    if raw.contains("exited with status") && raw.contains("before opening port") {
+        return Some(
+            "The Headroom Python runtime crashed at startup. \
+             Open Headroom logs from Settings to see the traceback, \
+             or reinstall the runtime from Settings > Advanced."
+                .into(),
+        );
+    }
+    None
+}
+
+fn is_headroom_proxy_reachable() -> bool {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+
+    ["127.0.0.1", "localhost"].iter().any(|host| {
+        client
+            .get(format!("http://{host}:6767/readyz"))
+            .send()
+            .map(|response| response.status().is_success())
+            .unwrap_or(false)
+    })
+}
+
+fn kill_processes_by_command_pattern(pattern: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let status = Command::new("pkill")
+            .args(["-f", pattern])
+            .status()
+            .with_context(|| format!("running pkill for pattern '{pattern}'"))?;
+
+        if status.success() || status.code() == Some(1) {
+            return Ok(());
+        }
+
+        return Err(anyhow!(
+            "pkill exited with status {:?} for pattern '{}'",
+            status.code(),
+            pattern
+        ));
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pattern;
+        Ok(())
+    }
+}
+
+/// Merge daily savings from tracker (pre-cutoff) and native headroom history (post-cutoff).
+/// For days before `cutoff_date` (exclusive), the tracker is preferred.
+/// For days on/after `cutoff_date`, native history is preferred.
+/// Falls back to whichever source has data when the preferred one is absent.
+fn merge_daily_savings(
+    tracker: Vec<DailySavingsPoint>,
+    history: Vec<DailySavingsPoint>,
+    cutoff_date: &str,
+) -> Vec<DailySavingsPoint> {
+    use std::collections::BTreeMap;
+    let mut by_date: BTreeMap<String, DailySavingsPoint> = BTreeMap::new();
+    // Post-cutoff: history wins, tracker fills gaps so today's local activity still shows.
+    // Pre-cutoff: tracker-only; history is ignored to avoid pulling in pre-v6 schema drift.
+    for p in history {
+        if p.date.as_str() >= cutoff_date {
+            by_date.insert(p.date.clone(), p);
+        }
+    }
+    for p in tracker {
+        if p.date.as_str() < cutoff_date {
+            by_date.insert(p.date.clone(), p);
+        } else {
+            by_date.entry(p.date.clone()).or_insert(p);
+        }
+    }
+    by_date.into_values().collect()
+}
+
+/// Same logic as `merge_daily_savings` but for hourly buckets keyed by hour string.
+fn merge_hourly_savings(
+    tracker: Vec<HourlySavingsPoint>,
+    history: Vec<HourlySavingsPoint>,
+    cutoff_hour: &str,
+) -> Vec<HourlySavingsPoint> {
+    use std::collections::BTreeMap;
+    let mut by_hour: BTreeMap<String, HourlySavingsPoint> = BTreeMap::new();
+    for p in history {
+        if p.hour.as_str() >= cutoff_hour {
+            by_hour.insert(p.hour.clone(), p);
+        }
+    }
+    for p in tracker {
+        if p.hour.as_str() < cutoff_hour {
+            by_hour.insert(p.hour.clone(), p);
+        } else {
+            by_hour.entry(p.hour.clone()).or_insert(p);
+        }
+    }
+    by_hour.into_values().collect()
+}
+
+fn begin_bootstrap_transition(
+    current: &BootstrapProgress,
+    python_installed: bool,
+) -> (BootstrapProgress, Result<(), String>) {
+    if python_installed {
+        return (
+            BootstrapProgress {
+                running: false,
+                complete: true,
+                failed: false,
+                current_step: "Install complete".into(),
+                message: "Managed runtime already installed.".into(),
+                current_step_eta_seconds: 0,
+                overall_percent: 100,
+            },
+            Ok(()),
+        );
+    }
+    if current.running {
+        return (current.clone(), Err("Bootstrap is already running.".into()));
+    }
+    (
+        BootstrapProgress {
+            running: true,
+            complete: false,
+            failed: false,
+            current_step: "Preparing install".into(),
+            message: "Initializing installer workflow.".into(),
+            current_step_eta_seconds: 3,
+            overall_percent: 2,
+        },
+        Ok(()),
+    )
+}
+
+fn apply_bootstrap_step(
+    _current: &BootstrapProgress,
+    step: BootstrapStepUpdate,
+) -> BootstrapProgress {
+    BootstrapProgress {
+        running: true,
+        complete: false,
+        failed: false,
+        current_step: step.step.into(),
+        message: step.message,
+        current_step_eta_seconds: step.eta_seconds,
+        overall_percent: step.percent,
+    }
+}
+
+fn bootstrap_complete_state() -> BootstrapProgress {
+    BootstrapProgress {
+        running: false,
+        complete: true,
+        failed: false,
+        current_step: "Install complete".into(),
+        message: "Headroom is ready.".into(),
+        current_step_eta_seconds: 0,
+        overall_percent: 100,
+    }
+}
+
+fn bootstrap_failed_state(current: &BootstrapProgress, message: String) -> BootstrapProgress {
+    BootstrapProgress {
+        running: false,
+        complete: false,
+        failed: true,
+        current_step: "Install failed".into(),
+        message,
+        current_step_eta_seconds: 0,
+        overall_percent: current.overall_percent.max(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use chrono::{Datelike, Local, TimeZone, Timelike, Utc};
+
+    use crate::storage::{config_file, ensure_data_dirs, telemetry_file};
+
+    use crate::models::{
+        ActivityEvent, BootstrapProgress, DailySavingsPoint, HourlySavingsPoint,
+        RuntimeUpgradeFailure, UpgradeFailurePhase,
+    };
+    use crate::tool_manager::BootstrapStepUpdate;
+
+    use super::{
+        aggregate_weekly_totals, apply_bootstrap_step, begin_bootstrap_transition,
+        boot_validation_stalled, BootValidationOutcome, bootstrap_complete_state, bootstrap_failed_state,
+        classify_startup_error, cpu_time_advanced, hf_cache_grew,
+        lifetime_token_milestones_crossed, lifetime_usd_milestones_crossed, log_mtime_advanced,
+        merge_daily_savings, merge_hourly_savings, most_recent_monday, parse_headroom_stats_from_json,
+        parse_headroom_stats_history_from_json, parse_ps_cpu_time, tcp_port_accepts_connection,
+        total_dir_size_bytes, AppState, ClaudeProjectScan,
+        DailySavingsBucket, HeadroomDashboardStats, HeadroomSavingsHistoryPoint,
+        PersistedSavingsState, SavingsObservation, SavingsTracker,
+    };
+
+    #[test]
+    fn boot_validation_stalled_within_grace_window_is_never_stalled() {
+        use std::time::Duration;
+        let grace = Duration::from_secs(60);
+        let silence = Duration::from_secs(90);
+        // Inside grace, ignore activity_age entirely.
+        assert!(!boot_validation_stalled(
+            Duration::from_secs(30),
+            Duration::from_secs(120),
+            grace,
+            silence,
+        ));
+        // Boundary: elapsed == grace is NOT past grace (strict >).
+        assert!(!boot_validation_stalled(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            grace,
+            silence,
+        ));
+    }
+
+    #[test]
+    fn boot_validation_stalled_past_grace_with_recent_activity_is_not_stalled() {
+        use std::time::Duration;
+        let grace = Duration::from_secs(60);
+        let silence = Duration::from_secs(90);
+        // Past grace but log/HF moved within the silence window.
+        assert!(!boot_validation_stalled(
+            Duration::from_secs(120),
+            Duration::from_secs(30),
+            grace,
+            silence,
+        ));
+        // Boundary: activity_age == silence is NOT past silence.
+        assert!(!boot_validation_stalled(
+            Duration::from_secs(120),
+            Duration::from_secs(90),
+            grace,
+            silence,
+        ));
+    }
+
+    #[test]
+    fn boot_validation_stalled_past_grace_and_silence_fires() {
+        use std::time::Duration;
+        let grace = Duration::from_secs(60);
+        let silence = Duration::from_secs(90);
+        // Past grace, activity stale → stalled.
+        assert!(boot_validation_stalled(
+            Duration::from_secs(120),
+            Duration::from_secs(91),
+            grace,
+            silence,
+        ));
+        // Reproduces the original Sentry trace shape (with old 45s
+        // silence): 64.7s elapsed, ~50s of silence past mtime → stall.
+        assert!(boot_validation_stalled(
+            Duration::from_secs(64),
+            Duration::from_secs(50),
+            Duration::from_secs(60),
+            Duration::from_secs(45),
+        ));
+        // Same trace with the new 90s silence and (no) HF growth signal:
+        // would still stall, but only after another 40s. Without HF
+        // growth refreshing activity_age, this is the worst-case bound.
+        assert!(!boot_validation_stalled(
+            Duration::from_secs(64),
+            Duration::from_secs(50),
+            Duration::from_secs(60),
+            Duration::from_secs(90),
+        ));
+    }
+
+    #[test]
+    fn boot_validation_outcome_labels_are_stable() {
+        // These labels become Sentry tags and analytics dimensions —
+        // changing them silently invalidates dashboards.
+        assert_eq!(BootValidationOutcome::Reachable.label(), "reachable");
+        assert_eq!(BootValidationOutcome::ProcessExited.label(), "process_exited");
+        assert_eq!(BootValidationOutcome::Stalled.label(), "stalled");
+        assert_eq!(BootValidationOutcome::TimedOut.label(), "timed_out");
+        assert_eq!(BootValidationOutcome::NotStarted.label(), "not_started");
+        assert!(BootValidationOutcome::Reachable.is_ok());
+        assert!(!BootValidationOutcome::NotStarted.is_ok());
+    }
+
+    #[test]
+    fn log_mtime_advanced_detects_first_observation_and_new_writes() {
+        use std::time::{Duration, SystemTime};
+        let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let t2 = t1 + Duration::from_secs(1);
+
+        // First time we see a log file.
+        assert!(log_mtime_advanced(None, Some(t1)));
+        // Newer write after a previous observation.
+        assert!(log_mtime_advanced(Some(t1), Some(t2)));
+        // No change.
+        assert!(!log_mtime_advanced(Some(t1), Some(t1)));
+        // Log "vanished" (shouldn't happen on a healthy boot, but the
+        // function must not declare activity in that case).
+        assert!(!log_mtime_advanced(Some(t1), None));
+        // Both None — pre-first-write state, no activity.
+        assert!(!log_mtime_advanced(None, None));
+    }
+
+    #[test]
+    fn hf_cache_grew_returns_true_only_on_growth() {
+        // First observation after the cache dir appeared. Empty dir
+        // doesn't count as activity (HF created the dir but hasn't
+        // started downloading yet).
+        assert!(!hf_cache_grew(None, 0));
+        // First observation with content — counts as growth.
+        assert!(hf_cache_grew(None, 100));
+        // Strictly grew.
+        assert!(hf_cache_grew(Some(100), 200));
+        // Unchanged.
+        assert!(!hf_cache_grew(Some(100), 100));
+        // Shrunk (HF cache pruning during boot — rare, but the function
+        // shouldn't lie and call this growth).
+        assert!(!hf_cache_grew(Some(200), 100));
+    }
+
+    #[test]
+    fn parse_ps_cpu_time_handles_macos_formats() {
+        // MM:SS.ss (most common — processes under an hour of CPU)
+        assert_eq!(parse_ps_cpu_time("0:00.05"), Some(0));
+        assert_eq!(parse_ps_cpu_time("0:42.13"), Some(42));
+        assert_eq!(parse_ps_cpu_time("12:34.99"), Some(12 * 60 + 34));
+        // HH:MM:SS (longer-lived processes)
+        assert_eq!(parse_ps_cpu_time("1:23:45"), Some(3600 + 23 * 60 + 45));
+        // D-HH:MM:SS (multi-day uptime)
+        assert_eq!(
+            parse_ps_cpu_time("2-01:23:45"),
+            Some(2 * 86400 + 3600 + 23 * 60 + 45)
+        );
+        // Whitespace tolerated (ps emits a trailing newline)
+        assert_eq!(parse_ps_cpu_time("  0:42.13\n"), Some(42));
+        // Bad input returns None rather than panicking.
+        assert_eq!(parse_ps_cpu_time(""), None);
+        assert_eq!(parse_ps_cpu_time("   "), None);
+        assert_eq!(parse_ps_cpu_time("not-a-time"), None);
+        assert_eq!(parse_ps_cpu_time("1:2:3:4"), None);
+    }
+
+    #[test]
+    fn cpu_time_advanced_detects_growth_only() {
+        // Strictly grew → activity.
+        assert!(cpu_time_advanced(Some(3), Some(5)));
+        // First observation with non-zero CPU → activity (process was
+        // already burning cycles before we started polling).
+        assert!(cpu_time_advanced(None, Some(5)));
+        // First observation with zero CPU → not yet doing work.
+        assert!(!cpu_time_advanced(None, Some(0)));
+        // Unchanged (whole-second resolution; sub-second growth is
+        // dropped by the parser, so equal seconds means "no second
+        // elapsed of CPU time").
+        assert!(!cpu_time_advanced(Some(5), Some(5)));
+        // ps stopped reporting (process gone) — not activity.
+        assert!(!cpu_time_advanced(Some(5), None));
+        // Both None — process never tracked or never observed.
+        assert!(!cpu_time_advanced(None, None));
+    }
+
+    #[test]
+    fn tcp_port_accepts_connection_true_when_listener_bound() {
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        // Bind to an ephemeral port; OS picks an unused one.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let addr = listener.local_addr().expect("local_addr");
+
+        assert!(tcp_port_accepts_connection(addr, Duration::from_secs(1)));
+
+        // The listener never accept()s — but the kernel still completes
+        // the connect, which is the whole point: an alive-but-busy
+        // proxy whose event loop is held still passes this check.
+        drop(listener);
+    }
+
+    #[test]
+    fn tcp_port_accepts_connection_false_when_no_listener() {
+        use std::net::{SocketAddr, TcpListener};
+        use std::time::Duration;
+
+        // Bind to grab a port, then drop the listener so nothing is
+        // listening on it. The OS can hand that freed port to another
+        // process between drop() and connect_timeout(), so retry with
+        // fresh ephemeral ports until one stays closed long enough to
+        // observe. If every attempt across N tries shows accepted, the
+        // function is genuinely broken.
+        for _ in 0..16 {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+            let addr: SocketAddr = listener.local_addr().expect("local_addr");
+            drop(listener);
+
+            if !tcp_port_accepts_connection(addr, Duration::from_millis(200)) {
+                return;
+            }
+        }
+        panic!(
+            "tcp_port_accepts_connection returned true on 16 freshly-released ephemeral ports"
+        );
+    }
+
+    #[test]
+    fn total_dir_size_bytes_returns_zero_for_missing_path() {
+        let missing = std::env::temp_dir().join(format!("headroom-no-such-{}", uuid::Uuid::new_v4()));
+        assert_eq!(total_dir_size_bytes(&missing, 1000), 0);
+    }
+
+    #[test]
+    fn total_dir_size_bytes_sums_files_recursively() {
+        let id = uuid::Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("headroom-hf-test-{id}"));
+        fs::create_dir_all(root.join("subdir/deeper")).expect("mkdir");
+        fs::write(root.join("a.bin"), vec![0u8; 100]).expect("write a");
+        fs::write(root.join("subdir/b.bin"), vec![0u8; 200]).expect("write b");
+        fs::write(root.join("subdir/deeper/c.bin"), vec![0u8; 50]).expect("write c");
+
+        assert_eq!(total_dir_size_bytes(&root, 1000), 350);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn total_dir_size_bytes_skips_symlinks_to_avoid_double_count() {
+        // HF hub layout: snapshots/<rev>/<file> is a symlink into blobs/<sha>.
+        // Counting both would overstate. We count only real files.
+        let id = uuid::Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("headroom-hf-symlink-test-{id}"));
+        fs::create_dir_all(root.join("blobs")).expect("mkdir blobs");
+        fs::create_dir_all(root.join("snapshots")).expect("mkdir snapshots");
+        fs::write(root.join("blobs/file1"), vec![0u8; 500]).expect("write blob");
+
+        let symlink_target = root.join("blobs/file1");
+        let symlink_path = root.join("snapshots/file1");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&symlink_target, &symlink_path).expect("symlink");
+
+        // 500 bytes (the blob), not 1000 (blob + symlink content).
+        assert_eq!(total_dir_size_bytes(&root, 1000), 500);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn total_dir_size_bytes_respects_max_entries_cap() {
+        let id = uuid::Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("headroom-hf-cap-test-{id}"));
+        fs::create_dir_all(&root).expect("mkdir");
+        for i in 0..20 {
+            fs::write(root.join(format!("f{i}")), vec![0u8; 10]).expect("write");
+        }
+        // With a tight cap, we may visit fewer than all 20 files. The
+        // exact early-stop count depends on read_dir's iteration order;
+        // assert only that we sum at most ``cap * file_size``.
+        let total_capped = total_dir_size_bytes(&root, 5);
+        assert!(total_capped <= 50, "got {total_capped}");
+        let total_full = total_dir_size_bytes(&root, 1000);
+        assert_eq!(total_full, 200);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn classify_startup_error_port_timeout() {
+        let raw = "unable to keep headroom running in background (prior attempts: \
+            /Users/x/venv/bin/headroom proxy --port 6768 never opened port 6768 within 60000ms): \
+            /Users/x/venv/bin/python3 -m headroom.proxy.server --port 6768 --no-http2 never opened port 6768 within 60000ms";
+        let hint = classify_startup_error(raw).expect("timeout should classify");
+        assert!(hint.contains("Gatekeeper"), "got: {hint}");
+        assert!(hint.contains("Retry"));
+    }
+
+    #[test]
+    fn classify_startup_error_python_crash() {
+        let raw = "unable to keep headroom running in background (prior attempts: \
+            /home/h/venv/bin/headroom proxy --port 6768 exited with status exit status: 1 before opening port 6768): \
+            /home/h/venv/bin/python3 -m headroom.proxy.server --port 6768 --no-http2 exited with status exit status: 1 before opening port 6768";
+        let hint = classify_startup_error(raw).expect("crash should classify");
+        assert!(hint.contains("crashed at startup"), "got: {hint}");
+        assert!(hint.contains("logs"));
+    }
+
+    #[test]
+    fn classify_startup_error_foreign_port() {
+        let raw =
+            "port 6768 is occupied by a non-headroom process (pid 1234 node); cannot start proxy.";
+        let hint = classify_startup_error(raw).expect("foreign port should classify");
+        assert!(hint.contains("Reboot"), "got: {hint}");
+    }
+
+    #[test]
+    fn classify_startup_error_foreign_port_with_fallback_exhausted() {
+        let raw =
+            "port 6768 is occupied by a non-headroom process (rapportd pid 594) and fallback ports 6769-6790 are also unavailable; cannot start proxy. Reboot to clear stuck listeners, then relaunch Headroom.";
+        let hint = classify_startup_error(raw).expect("all-foreign should classify");
+        assert!(hint.contains("Reboot"), "got: {hint}");
+    }
+
+    /// Defensive: classify_startup_error must NOT regress on any of the
+    /// bail strings that tool_manager actually produces. If the message
+    /// shape drifts (e.g. someone tweaks the bail wording), this test
+    /// fails and forces the classifier to be updated alongside.
+    #[test]
+    fn classify_startup_error_handles_every_tool_manager_bail_format() {
+        // 1. all-foreign exhaustion
+        let raw = "port 6768 is occupied by a non-headroom process (rapportd pid 594) and fallback ports 6769-6790 are also unavailable; cannot start proxy. \
+                   Reboot to clear stuck listeners, then relaunch Headroom.";
+        assert!(
+            classify_startup_error(raw).is_some(),
+            "all-foreign bail must classify"
+        );
+
+        // 2. stale headroom proxy
+        let raw = "headroom proxy already running on port 6768 (likely a stale process from a prior session). \
+                   Run `lsof -iTCP:6768 -sTCP:LISTEN` to find and kill it, then retry.";
+        assert!(
+            classify_startup_error(raw).is_some(),
+            "stale proxy bail must classify"
+        );
+
+        // 3. spawn timeout (port never opened) — phrased generically over
+        //    whatever port the proxy ended up on, so test with a fallback port.
+        let raw = "never opened port 6770 within 60000ms";
+        assert!(
+            classify_startup_error(raw).is_some(),
+            "spawn timeout must classify on any port"
+        );
+
+        // 4. python crash
+        let raw = "exited with status 1 before opening port 6770";
+        assert!(
+            classify_startup_error(raw).is_some(),
+            "python crash must classify on any port"
+        );
+    }
+
+    #[test]
+    fn classify_startup_error_stale_headroom() {
+        let raw = "headroom proxy already running on port 6768 (likely a stale process from a prior session).";
+        let hint = classify_startup_error(raw).expect("stale should classify");
+        assert!(hint.contains("relaunch"), "got: {hint}");
+    }
+
+    #[test]
+    fn classify_startup_error_unknown_returns_none() {
+        assert!(classify_startup_error("some other error").is_none());
+    }
+
+    #[test]
+    fn launch_profile_missing_new_fields_deserialize_as_none() {
+        // Legacy profile JSON from before we added last_launched_app_version
+        // and last_runtime_upgrade_failure. Must still parse.
+        let legacy = br#"{
+            "launch_count": 3,
+            "launch_experience": "resume",
+            "lifetime_requests": 0,
+            "lifetime_estimated_savings_usd": 0.0,
+            "lifetime_estimated_tokens_saved": 0
+        }"#;
+        let profile: super::LaunchProfile =
+            serde_json::from_slice(legacy).expect("legacy profile parses");
+        assert!(profile.last_launched_app_version.is_none());
+        assert!(profile.last_runtime_upgrade_failure.is_none());
+        assert!(!profile.setup_wizard_complete);
+    }
+
+    #[test]
+    fn persist_launch_profile_round_trips_new_fields() {
+        let id = uuid::Uuid::new_v4();
+        let path = std::env::temp_dir().join(format!("headroom-launch-profile-test-{}.json", id));
+        let profile = super::LaunchProfile {
+            launch_count: 1,
+            launch_experience: crate::models::LaunchExperience::Resume,
+            lifetime_requests: 0,
+            lifetime_estimated_savings_usd: 0.0,
+            lifetime_estimated_tokens_saved: 0,
+            setup_wizard_complete: true,
+            last_launched_app_version: Some("0.2.50".into()),
+            last_runtime_upgrade_failure: Some(crate::models::RuntimeUpgradeFailure {
+                app_version: "0.2.50".into(),
+                target_headroom_version: "0.8.2".into(),
+                fallback_headroom_version: Some("0.6.5".into()),
+                failure_phase: crate::models::UpgradeFailurePhase::BootValidation,
+                attempts: 2,
+                first_attempt_at: Utc::now(),
+                last_attempt_at: Utc::now(),
+                error_message: "timed out".into(),
+                error_hint: Some("Reverted to 0.6.5".into()),
+                rollback_restored: true,
+            }),
+        };
+        super::persist_launch_profile(&path, &profile);
+
+        let bytes = std::fs::read(&path).expect("persisted");
+        let round_tripped: super::LaunchProfile =
+            serde_json::from_slice(&bytes).expect("re-parses");
+        assert_eq!(
+            round_tripped.last_launched_app_version.as_deref(),
+            Some("0.2.50")
+        );
+        let failure = round_tripped
+            .last_runtime_upgrade_failure
+            .expect("failure present");
+        assert_eq!(failure.attempts, 2);
+        assert_eq!(failure.target_headroom_version, "0.8.2");
+        assert_eq!(
+            failure.failure_phase,
+            crate::models::UpgradeFailurePhase::BootValidation
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn make_tracker() -> SavingsTracker {
+        let id = uuid::Uuid::new_v4();
+        let records_path = std::env::temp_dir().join(format!("headroom-savings-test-{}.jsonl", id));
+        let state_path = std::env::temp_dir().join(format!("headroom-savings-state-{}.json", id));
+        SavingsTracker {
+            records_path,
+            state_path,
+            session_requests: 0,
+            session_estimated_savings_usd: 0.0,
+            session_estimated_tokens_saved: 0,
+            session_savings_pct: 0.0,
+            lifetime_requests: 0,
+            lifetime_estimated_savings_usd: 0.0,
+            lifetime_estimated_tokens_saved: 0,
+            last_observation: None,
+            display_session_baseline: None,
+            session_savings_history: Vec::new(),
+            session_hourly_buckets: std::collections::BTreeMap::new(),
+            daily_savings: std::collections::BTreeMap::new(),
+            hourly_savings: std::collections::BTreeMap::new(),
+            pending_lifetime_token_milestones: Vec::new(),
+            pending_lifetime_usd_milestones: Vec::new(),
+            last_written_at: None,
+        }
+    }
+
+    fn history_point_at(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        total_tokens_saved: u64,
+    ) -> HeadroomSavingsHistoryPoint {
+        HeadroomSavingsHistoryPoint {
+            timestamp: Utc
+                .with_ymd_and_hms(year, month, day, hour, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            total_tokens_saved,
+        }
+    }
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn write_headroom_receipt(base_dir: &PathBuf, version: &str, requirements_lock_sha256: &str) {
+        let runtime = crate::tool_manager::ManagedRuntime::bootstrap_root(base_dir);
+        fs::create_dir_all(&runtime.tools_dir).expect("create tools dir");
+        fs::write(
+            runtime.tools_dir.join("headroom.json"),
+            format!(
+                r#"{{
+                    "version":"{}",
+                    "artifact":{{"requirementsLockSha256":"{}"}}
+                }}"#,
+                version, requirements_lock_sha256
+            ),
+        )
+        .expect("write receipt");
+    }
+
+    #[test]
+    fn lifetime_usd_milestones_first_and_repeating() {
+        assert_eq!(lifetime_usd_milestones_crossed(0.0, 5.0), Vec::<u64>::new());
+        assert_eq!(lifetime_usd_milestones_crossed(9.99, 10.01), vec![10]);
+        assert_eq!(
+            lifetime_usd_milestones_crossed(5.0, 120.0),
+            vec![10, 50, 100]
+        );
+        assert_eq!(
+            lifetime_usd_milestones_crossed(200.0, 205.0),
+            Vec::<u64>::new()
+        );
+        assert_eq!(
+            lifetime_usd_milestones_crossed(199.5, 301.0),
+            vec![200, 300]
+        );
+    }
+
+    #[test]
+    fn savings_tracker_queues_pending_usd_milestones_on_observe() {
+        let mut tracker = make_tracker();
+        tracker.lifetime_estimated_savings_usd = 7.5;
+        let stats = HeadroomDashboardStats {
+            session_requests: Some(1),
+            session_estimated_savings_usd: Some(60.0),
+            session_estimated_tokens_saved: Some(1),
+            session_savings_pct: Some(1.0),
+            session_actual_cost_usd: Some(0.0),
+            session_total_tokens_sent: Some(0),
+            savings_history: Vec::new(),
+        };
+        tracker.observe(&stats);
+        let milestones = tracker.take_pending_lifetime_usd_milestones();
+        assert_eq!(milestones, vec![10, 50]);
+    }
+
+    #[test]
+    fn aggregate_weekly_totals_sums_active_days_in_window() {
+        use std::collections::BTreeMap;
+        let mut daily: BTreeMap<String, DailySavingsBucket> = BTreeMap::new();
+        daily.insert(
+            "2026-04-19".into(), // outside window (Sunday of week before)
+            DailySavingsBucket {
+                estimated_savings_usd: 1.0,
+                estimated_tokens_saved: 50,
+                actual_cost_usd: 0.0,
+                total_tokens_sent: 0,
+            },
+        );
+        daily.insert(
+            "2026-04-20".into(),
+            DailySavingsBucket {
+                estimated_savings_usd: 2.5,
+                estimated_tokens_saved: 200,
+                actual_cost_usd: 0.0,
+                total_tokens_sent: 0,
+            },
+        );
+        daily.insert(
+            "2026-04-23".into(),
+            DailySavingsBucket {
+                estimated_savings_usd: 1.0,
+                estimated_tokens_saved: 100,
+                actual_cost_usd: 0.0,
+                total_tokens_sent: 0,
+            },
+        );
+        daily.insert(
+            "2026-04-26".into(),
+            DailySavingsBucket {
+                estimated_savings_usd: 0.0,
+                estimated_tokens_saved: 0, // zero activity day — not counted
+                actual_cost_usd: 0.0,
+                total_tokens_sent: 0,
+            },
+        );
+        daily.insert(
+            "2026-04-27".into(), // outside window (today Monday)
+            DailySavingsBucket {
+                estimated_savings_usd: 99.0,
+                estimated_tokens_saved: 9999,
+                actual_cost_usd: 0.0,
+                total_tokens_sent: 0,
+            },
+        );
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 4, 20).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 4, 26).unwrap();
+        let totals = aggregate_weekly_totals(&daily, start, end);
+        assert_eq!(totals.active_days, 2);
+        assert_eq!(totals.total_tokens_saved, 300);
+        assert!((totals.total_savings_usd - 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn most_recent_monday_maps_every_weekday_to_this_weeks_monday() {
+        use chrono::NaiveDate;
+        // Monday 2026-04-27 — itself.
+        assert_eq!(
+            most_recent_monday(NaiveDate::from_ymd_opt(2026, 4, 27).unwrap()),
+            NaiveDate::from_ymd_opt(2026, 4, 27).unwrap()
+        );
+        // Wednesday 2026-04-29 — back to Monday 27.
+        assert_eq!(
+            most_recent_monday(NaiveDate::from_ymd_opt(2026, 4, 29).unwrap()),
+            NaiveDate::from_ymd_opt(2026, 4, 27).unwrap()
+        );
+        // Sunday 2026-05-03 — back to Monday 27 (6 days back).
+        assert_eq!(
+            most_recent_monday(NaiveDate::from_ymd_opt(2026, 5, 3).unwrap()),
+            NaiveDate::from_ymd_opt(2026, 4, 27).unwrap()
+        );
+    }
+
+    #[test]
+    fn observe_activity_separates_fresh_from_recent_across_calls() {
+        use crate::models::TransformationFeedEvent;
+        let base_dir = temp_test_dir("headroom-activity-observation");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+
+        let transformation = TransformationFeedEvent {
+            request_id: Some("r1".into()),
+            timestamp: Some("2026-04-22T10:00:00Z".into()),
+            provider: Some("anthropic".into()),
+            model: Some("claude-opus-4-7".into()),
+            input_tokens_original: Some(10_000),
+            input_tokens_optimized: Some(2_000),
+            tokens_saved: Some(8_000),
+            savings_percent: Some(80.0),
+            transforms_applied: vec!["kompress".into()],
+            workspace: Some("/Users/u/Code/demo".into()),
+            turn_id: None,
+            request_messages: None,
+            compressed_messages: None,
+        };
+
+        let first = state.observe_activity_from_transformations(&[transformation.clone()]);
+        assert!(
+            !first.fresh.is_empty(),
+            "first observation should emit fresh events"
+        );
+        // First compression that beats the zero baseline emits a Daily+AllTime
+        // Record.
+        assert!(
+            first
+                .fresh
+                .iter()
+                .any(|e| matches!(e, ActivityEvent::Record(_))),
+            "first record should fire"
+        );
+        // Snapshot after the first observation has the record slot populated.
+        let first_snapshot = state.activity_feed_snapshot();
+        assert!(first_snapshot.record.is_some());
+        assert!(first_snapshot.transformation.is_some());
+
+        let second = state.observe_activity_from_transformations(&[transformation]);
+        assert!(
+            second.fresh.is_empty(),
+            "second observation of same transformation should emit no fresh events"
+        );
+        // Snapshot still carries the slots across the no-op second call.
+        let second_snapshot = state.activity_feed_snapshot();
+        assert!(second_snapshot.record.is_some());
+        assert!(second_snapshot.transformation.is_some());
+
+        fs::remove_dir_all(base_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn dashboard_includes_managed_tools() {
+        let base_dir = temp_test_dir("headroom-app-state");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        let dashboard = state.dashboard();
+
+        assert!(dashboard.tools.iter().any(|tool| tool.id == "headroom"));
+        assert!(dashboard.tools.iter().any(|tool| tool.id == "rtk"));
+        assert!(dashboard
+            .insights
+            .iter()
+            .any(|insight| !insight.title.is_empty()));
+
+        fs::remove_dir_all(base_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn proxy_bypass_initialises_to_false() {
+        let base_dir = temp_test_dir("headroom-bypass-init");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        assert!(
+            !state
+                .proxy_bypass
+                .load(std::sync::atomic::Ordering::Acquire),
+            "fresh AppState must default to bypass=off so the intercept routes through the Python proxy"
+        );
+        fs::remove_dir_all(base_dir).expect("remove temp dir");
+    }
+
+    fn pricing_status_with_optimization(allowed: bool) -> crate::models::HeadroomPricingStatus {
+        use crate::models::{
+            ClaudeAccountProfile, ClaudeAuthMethod, ClaudePlanTier, HeadroomPricingStatus,
+        };
+        let now = chrono::Utc::now();
+        HeadroomPricingStatus {
+            authenticated: true,
+            local_grace_started_at: now,
+            local_grace_ends_at: now,
+            local_grace_active: false,
+            account_sync_error: None,
+            needs_authentication: false,
+            optimization_allowed: allowed,
+            should_nudge: false,
+            nudge_level: 0,
+            gate_reason: None,
+            gate_message: String::new(),
+            nudge_threshold_percent: None,
+            effective_nudge_thresholds_percent: None,
+            disable_threshold_percent: None,
+            effective_disable_threshold_percent: None,
+            recommended_subscription_tier: None,
+            claude: ClaudeAccountProfile {
+                auth_method: ClaudeAuthMethod::Unknown,
+                email: None,
+                display_name: None,
+                account_uuid: None,
+                organization_uuid: None,
+                billing_type: None,
+                account_created_at: None,
+                subscription_created_at: None,
+                has_extra_usage_enabled: false,
+                plan_tier: ClaudePlanTier::Unknown,
+                plan_detection_source: None,
+                organization_type: None,
+                rate_limit_tier: None,
+                weekly_utilization_pct: None,
+                five_hour_utilization_pct: None,
+                extra_usage_monthly_limit: None,
+                profile_fetch_error: None,
+            },
+            account: None,
+            launch_discount_active: false,
+        }
+    }
+
+    #[test]
+    fn apply_pricing_gate_status_flips_bypass_on_for_gated_status() {
+        let base_dir = temp_test_dir("headroom-bypass-on");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        assert!(!state
+            .proxy_bypass
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        // Debounce: first gated reading just bumps the streak.
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
+        assert!(
+            !state
+                .proxy_bypass
+                .load(std::sync::atomic::Ordering::Acquire),
+            "first gated reading must not flip bypass yet"
+        );
+
+        // Second consecutive gated reading crosses the debounce threshold.
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
+        assert!(
+            state
+                .proxy_bypass
+                .load(std::sync::atomic::Ordering::Acquire),
+            "second consecutive gated reading must flip bypass=true"
+        );
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn apply_pricing_gate_status_resets_streak_on_ungated_reading() {
+        let base_dir = temp_test_dir("headroom-bypass-debounce-reset");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+
+        // One gated reading bumps the streak to 1.
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
+        assert!(!state
+            .proxy_bypass
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        // Ungated reading resets the streak — a single-poll spike clears.
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(true));
+
+        // Now another gated reading is the first of a new window, not the
+        // second of the old one. Bypass must still be off.
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
+        assert!(
+            !state
+                .proxy_bypass
+                .load(std::sync::atomic::Ordering::Acquire),
+            "an intervening ungated reading must reset the debounce streak"
+        );
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn apply_pricing_gate_status_clears_bypass_for_ungated_status() {
+        let base_dir = temp_test_dir("headroom-bypass-off");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        // Pre-set the flag, simulating that the gate fired earlier.
+        state
+            .proxy_bypass
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(true));
+
+        assert!(
+            !state
+                .proxy_bypass
+                .load(std::sync::atomic::Ordering::Acquire),
+            "ungated status must clear bypass — this is the upgrade-recovery path"
+        );
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn apply_pricing_gate_status_is_idempotent_when_state_already_matches() {
+        let base_dir = temp_test_dir("headroom-bypass-noop");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+
+        // Already off + ungated status → still off (no transition triggered).
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(true));
+        assert!(!state
+            .proxy_bypass
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        // Two consecutive gated readings cross the debounce threshold and flip.
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
+        assert!(state
+            .proxy_bypass
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        // Already on + gated status → still on.
+        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
+        assert!(state
+            .proxy_bypass
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn last_known_good_plan_returns_none_on_fresh_install() {
+        let base_dir = temp_test_dir("headroom-last-known-good-fresh");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        assert!(state.last_known_good_plan_tier().is_none());
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn record_known_good_plan_tier_skips_unknown() {
+        use crate::models::ClaudePlanTier;
+        let base_dir = temp_test_dir("headroom-last-known-good-skip-unknown");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        state.record_known_good_plan_tier(&ClaudePlanTier::Pro);
+        state.record_known_good_plan_tier(&ClaudePlanTier::Unknown);
+        assert!(matches!(
+            state.last_known_good_plan_tier(),
+            Some(ClaudePlanTier::Pro)
+        ));
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn last_known_good_plan_persists_across_appstate_reload() {
+        use crate::models::ClaudePlanTier;
+        let base_dir = temp_test_dir("headroom-last-known-good-persist");
+        {
+            let state = AppState::new_in(base_dir.clone()).expect("app state");
+            state.record_known_good_plan_tier(&ClaudePlanTier::Max5x);
+        }
+        let reloaded = AppState::new_in(base_dir.clone()).expect("reloaded app state");
+        assert!(matches!(
+            reloaded.last_known_good_plan_tier(),
+            Some(ClaudePlanTier::Max5x)
+        ));
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn record_known_good_plan_tier_overwrites_with_newer_known_tier() {
+        use crate::models::ClaudePlanTier;
+        let base_dir = temp_test_dir("headroom-last-known-good-overwrite");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        state.record_known_good_plan_tier(&ClaudePlanTier::Pro);
+        state.record_known_good_plan_tier(&ClaudePlanTier::Max20x);
+        assert!(matches!(
+            state.last_known_good_plan_tier(),
+            Some(ClaudePlanTier::Max20x)
+        ));
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn runtime_maintenance_plan_prefers_requirements_repair_when_only_lock_is_stale() {
+        let base_dir = temp_test_dir("headroom-maintenance-repair");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        write_headroom_receipt(
+            &base_dir,
+            crate::tool_manager::HEADROOM_PINNED_VERSION,
+            "stale",
+        );
+
+        let plan = state.runtime_maintenance_plan_for_app_version(env!("CARGO_PKG_VERSION"));
+        assert!(matches!(
+            plan,
+            Some(super::RuntimeMaintenancePlan::RequirementsRepair)
+        ));
+
+        fs::remove_dir_all(base_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn runtime_maintenance_plan_prefers_upgrade_over_requirements_repair() {
+        let base_dir = temp_test_dir("headroom-maintenance-upgrade");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        write_headroom_receipt(&base_dir, "0.6.5", "stale");
+
+        let plan = state.runtime_maintenance_plan_for_app_version(env!("CARGO_PKG_VERSION"));
+        match plan {
+            Some(super::RuntimeMaintenancePlan::Upgrade(release)) => {
+                assert_eq!(
+                    release.version(),
+                    crate::tool_manager::HEADROOM_PINNED_VERSION
+                );
+            }
+            _ => panic!("expected version upgrade plan"),
+        }
+
+        fs::remove_dir_all(base_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn runtime_maintenance_plan_skips_when_current_app_version_already_succeeded() {
+        let base_dir = temp_test_dir("headroom-maintenance-stamped");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        write_headroom_receipt(&base_dir, "0.9.7", "stale");
+        state.stamp_app_version(env!("CARGO_PKG_VERSION"));
+
+        let plan = state.runtime_maintenance_plan_for_app_version(env!("CARGO_PKG_VERSION"));
+        assert!(plan.is_none());
+
+        fs::remove_dir_all(base_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn runtime_maintenance_plan_skips_when_retry_budget_is_exhausted() {
+        let base_dir = temp_test_dir("headroom-maintenance-budget");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+        write_headroom_receipt(&base_dir, "0.6.5", "stale");
+
+        for _ in 0..super::MAX_UPGRADE_AUTO_RETRIES {
+            state.record_upgrade_failure(RuntimeUpgradeFailure {
+                app_version: env!("CARGO_PKG_VERSION").into(),
+                target_headroom_version: "0.8.2".into(),
+                fallback_headroom_version: Some("0.6.5".into()),
+                failure_phase: UpgradeFailurePhase::Install,
+                attempts: 0,
+                first_attempt_at: Utc::now(),
+                last_attempt_at: Utc::now(),
+                error_message: "failed".into(),
+                error_hint: None,
+                rollback_restored: true,
+            });
+        }
+
+        let plan = state.runtime_maintenance_plan_for_app_version(env!("CARGO_PKG_VERSION"));
+        assert!(plan.is_none());
+
+        fs::remove_dir_all(base_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn lifetime_token_milestones_include_firsts_and_repeating_tens() {
+        assert_eq!(
+            lifetime_token_milestones_crossed(0, 5_000_000),
+            vec![100_000, 1_000_000, 5_000_000]
+        );
+        assert_eq!(
+            lifetime_token_milestones_crossed(9_500_000, 21_000_000),
+            vec![10_000_000, 20_000_000]
+        );
+        assert_eq!(lifetime_token_milestones_crossed(0, 150_000), vec![100_000]);
+    }
+
+    #[test]
+    fn tracker_queues_new_lifetime_token_milestones_once() {
+        let mut tracker = make_tracker();
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(1),
+                session_estimated_savings_usd: Some(1.0),
+                session_estimated_tokens_saved: Some(12_000_000),
+                session_savings_pct: Some(50.0),
+                session_actual_cost_usd: Some(0.5),
+                session_total_tokens_sent: Some(12_000_000),
+                savings_history: Vec::new(),
+            })
+            .expect("snapshot");
+
+        assert_eq!(
+            tracker.take_pending_lifetime_token_milestones(),
+            vec![100_000, 1_000_000, 5_000_000, 10_000_000]
+        );
+        assert!(tracker.take_pending_lifetime_token_milestones().is_empty());
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(2),
+                session_estimated_savings_usd: Some(2.0),
+                session_estimated_tokens_saved: Some(21_000_000),
+                session_savings_pct: Some(50.0),
+                session_actual_cost_usd: Some(1.0),
+                session_total_tokens_sent: Some(21_000_000),
+                savings_history: Vec::new(),
+            })
+            .expect("snapshot");
+
+        assert_eq!(
+            tracker.take_pending_lifetime_token_milestones(),
+            vec![20_000_000]
+        );
+    }
+
+    #[test]
+    fn dashboard_read_path_preserves_pending_milestones_for_analytics() {
+        // Regression guard: `state.dashboard()` (tray updater, bootstrap
+        // finalize, account activation) must not drain pending milestones.
+        // Only `dashboard_with_pending_milestones()` — the path that actually
+        // fires the aptabase event, pricing report, and in-app notification —
+        // may consume them. A prior refactor drained on every call, so the
+        // tray updater's 5s heartbeat silently ate ~50-100% of crossings.
+        let base_dir = temp_test_dir("headroom-milestone-preservation");
+        let state = AppState::new_in(base_dir.clone()).expect("app state");
+
+        let stats = HeadroomDashboardStats {
+            session_requests: Some(1),
+            session_estimated_savings_usd: Some(1.0),
+            session_estimated_tokens_saved: Some(1_500_000),
+            session_savings_pct: Some(50.0),
+            session_actual_cost_usd: Some(0.5),
+            session_total_tokens_sent: Some(1_500_000),
+            savings_history: Vec::new(),
+        };
+
+        let (_, _, _, read_only) = state
+            .record_savings_snapshot(&stats, false)
+            .expect("snapshot");
+        assert!(
+            read_only.token.is_empty(),
+            "read-only path must not surface milestones"
+        );
+
+        let (_, _, _, drained) = state
+            .record_savings_snapshot(&stats, true)
+            .expect("snapshot");
+        assert_eq!(
+            drained.token,
+            vec![100_000, 1_000_000],
+            "drain=true must surface milestones queued by the earlier read-only observe"
+        );
+
+        let (_, _, _, drained_again) = state
+            .record_savings_snapshot(&stats, true)
+            .expect("snapshot");
+        assert!(
+            drained_again.token.is_empty(),
+            "second drain finds nothing: milestones fire exactly once"
+        );
+
+        fs::remove_dir_all(base_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn session_counters_follow_headroom_stats() {
+        let mut tracker = make_tracker();
+
+        let first = tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(10),
+                session_estimated_savings_usd: Some(1.2),
+                session_estimated_tokens_saved: Some(1_200),
+                session_savings_pct: Some(24.0),
+                session_actual_cost_usd: Some(3.8),
+                session_total_tokens_sent: Some(3_800),
+                savings_history: Vec::new(),
+            })
+            .expect("first snapshot");
+        assert_eq!(first.session_requests, 10);
+        assert_eq!(first.session_estimated_tokens_saved, 1_200);
+        assert!((first.session_estimated_savings_usd - 1.2).abs() < 1e-9);
+        assert!((first.session_savings_pct - 24.0).abs() < 1e-9);
+        assert_eq!(first.lifetime_requests, 10);
+        assert_eq!(first.lifetime_estimated_tokens_saved, 1_200);
+        assert!((first.lifetime_estimated_savings_usd - 1.2).abs() < 1e-9);
+
+        let second = tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(12),
+                session_estimated_savings_usd: Some(1.5),
+                session_estimated_tokens_saved: Some(1_500),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(4.5),
+                session_total_tokens_sent: Some(4_500),
+                savings_history: Vec::new(),
+            })
+            .expect("second snapshot");
+        assert_eq!(second.session_requests, 12);
+        assert_eq!(second.session_estimated_tokens_saved, 1_500);
+        assert!((second.session_estimated_savings_usd - 1.5).abs() < 1e-9);
+        assert_eq!(second.lifetime_requests, 12);
+        assert_eq!(second.lifetime_estimated_tokens_saved, 1_500);
+        assert!((second.lifetime_estimated_savings_usd - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn new_session_resets_live_session_and_keeps_lifetime() {
+        let mut tracker = make_tracker();
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(10),
+                session_estimated_savings_usd: Some(1.0),
+                session_estimated_tokens_saved: Some(1_000),
+                session_savings_pct: Some(20.0),
+                session_actual_cost_usd: Some(4.0),
+                session_total_tokens_sent: Some(4_000),
+                savings_history: Vec::new(),
+            })
+            .expect("initial session");
+
+        let reset = tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(2),
+                session_estimated_savings_usd: Some(0.2),
+                session_estimated_tokens_saved: Some(200),
+                session_savings_pct: Some(18.0),
+                session_actual_cost_usd: Some(0.9),
+                session_total_tokens_sent: Some(900),
+                savings_history: Vec::new(),
+            })
+            .expect("reset snapshot");
+        assert_eq!(reset.session_requests, 2);
+        assert_eq!(reset.session_estimated_tokens_saved, 200);
+        assert!((reset.session_estimated_savings_usd - 0.2).abs() < 1e-9);
+        assert_eq!(reset.lifetime_requests, 12);
+        assert_eq!(reset.lifetime_estimated_tokens_saved, 1_200);
+        assert!((reset.lifetime_estimated_savings_usd - 1.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn first_observation_backfills_daily_history_from_headroom() {
+        let mut tracker = make_tracker();
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(4),
+                session_estimated_savings_usd: Some(0.5),
+                session_estimated_tokens_saved: Some(1_000),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.3),
+                session_total_tokens_sent: Some(3_000),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 11, 0),
+                    history_point_at(2026, 3, 20, 12, 400),
+                    history_point_at(2026, 3, 21, 12, 1_000),
+                ],
+            })
+            .expect("snapshot");
+
+        let daily = tracker.daily_savings();
+        let expected_days = [
+            Utc.with_ymd_and_hms(2026, 3, 20, 12, 0, 0)
+                .single()
+                .expect("day one")
+                .with_timezone(&Local)
+                .format("%Y-%m-%d")
+                .to_string(),
+            Utc.with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
+                .single()
+                .expect("day two")
+                .with_timezone(&Local)
+                .format("%Y-%m-%d")
+                .to_string(),
+        ];
+        assert_eq!(daily.len(), 2);
+        assert_eq!(daily[0].date, expected_days[0]);
+        assert_eq!(daily[0].estimated_tokens_saved, 400);
+        assert_eq!(daily[0].total_tokens_sent, 1_200);
+        assert_eq!(daily[1].date, expected_days[1]);
+        assert_eq!(daily[1].estimated_tokens_saved, 600);
+        assert_eq!(daily[1].total_tokens_sent, 1_800);
+        assert!(
+            (daily[0].estimated_savings_usd + daily[1].estimated_savings_usd - 0.5).abs() < 1e-9
+        );
+        assert!((daily[0].actual_cost_usd - 0.12).abs() < 1e-9);
+        assert!((daily[1].actual_cost_usd - 0.18).abs() < 1e-9);
+    }
+
+    #[test]
+    fn first_observation_backfills_hourly_history_for_today() {
+        let mut tracker = make_tracker();
+        let today = Local::now().date_naive();
+
+        // Pick three local-time hours today and convert to UTC components for
+        // history_point_at. Feeding the local date directly into UTC builders
+        // breaks in any TZ where local-hour-N maps to a different UTC date.
+        let to_utc_components = |local_hour: u32| -> (i32, u32, u32, u32) {
+            let utc = Local
+                .with_ymd_and_hms(today.year(), today.month(), today.day(), local_hour, 0, 0)
+                .single()
+                .expect("unambiguous local time")
+                .with_timezone(&Utc);
+            (utc.year(), utc.month(), utc.day(), utc.hour())
+        };
+        let (y0, m0, d0, h0) = to_utc_components(8);
+        let (y1, m1, d1, h1) = to_utc_components(9);
+        let (y2, m2, d2, h2) = to_utc_components(15);
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(4),
+                session_estimated_savings_usd: Some(0.5),
+                session_estimated_tokens_saved: Some(1_000),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.3),
+                session_total_tokens_sent: Some(3_000),
+                savings_history: vec![
+                    history_point_at(y0, m0, d0, h0, 0),
+                    history_point_at(y1, m1, d1, h1, 400),
+                    history_point_at(y2, m2, d2, h2, 1_000),
+                ],
+            })
+            .expect("snapshot");
+
+        let today_key = today.format("%Y-%m-%d").to_string();
+        let hourly = tracker
+            .hourly_savings()
+            .into_iter()
+            .filter(|point| point.hour.starts_with(&format!("{today_key}T")))
+            .collect::<Vec<_>>();
+        let expected_first_hour = format!("{today_key}T09:00");
+        let expected_second_hour = format!("{today_key}T15:00");
+        assert_eq!(hourly.len(), 2);
+        assert_eq!(hourly[0].hour, expected_first_hour);
+        assert_eq!(hourly[0].estimated_tokens_saved, 400);
+        assert_eq!(hourly[1].hour, expected_second_hour);
+        assert_eq!(hourly[1].estimated_tokens_saved, 600);
+        assert_eq!(hourly[0].total_tokens_sent, 1_200);
+        assert_eq!(hourly[1].total_tokens_sent, 1_800);
+    }
+
+    #[test]
+    fn claude_project_scan_dedupes_repeated_session_files() {
+        let test_dir = temp_test_dir("headroom-project-scan");
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let session_file = test_dir.join("session.jsonl");
+        fs::write(&session_file, "{\"cwd\":\"/tmp/project\"}\n").expect("write session file");
+
+        let mut scan = ClaudeProjectScan::default();
+        scan.add_session_files(vec![session_file.clone(), session_file]);
+
+        assert_eq!(scan.session_files.len(), 1);
+
+        fs::remove_dir_all(&test_dir).expect("remove temp dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_project_scan_dedupes_symlinked_session_files() {
+        use std::os::unix::fs::symlink;
+
+        let test_dir = temp_test_dir("headroom-project-scan-symlink");
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let real_dir = test_dir.join("real");
+        let alias_dir = test_dir.join("alias");
+        fs::create_dir_all(&real_dir).expect("create real dir");
+        symlink(&real_dir, &alias_dir).expect("create alias symlink");
+
+        let real_file = real_dir.join("session.jsonl");
+        let alias_file = alias_dir.join("session.jsonl");
+        fs::write(&real_file, "{\"cwd\":\"/tmp/project\"}\n").expect("write session file");
+
+        let mut scan = ClaudeProjectScan::default();
+        scan.add_session_files(vec![real_file, alias_file]);
+
+        assert_eq!(scan.session_files.len(), 1);
+
+        fs::remove_dir_all(&test_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn parse_headroom_stats_uses_compression_scoped_savings_fields() {
+        let parsed = parse_headroom_stats_from_json(
+            r#"{
+                "persistent_savings": {
+                    "lifetime": {
+                        "tokens_saved": 2400,
+                        "compression_savings_usd": 0.84
+                    }
+                },
+                "requests": { "total": 5 },
+                "tokens": {
+                    "saved": 1200,
+                    "total_after_compression": 3600
+                },
+                "cost": {
+                    "compression_savings_usd": 0.42,
+                    "savings_usd": 9.99,
+                    "net_savings_usd": 8.88,
+                    "actual_cost_usd": 1.23
+                },
+                "savings_history": [
+                    ["2026-03-21T10:00:00Z", 1200]
+                ]
+            }"#,
+        )
+        .expect("parsed stats");
+
+        assert_eq!(parsed.session_requests, Some(5));
+        assert_eq!(parsed.session_estimated_tokens_saved, Some(1_200));
+        assert_eq!(parsed.session_estimated_savings_usd, Some(0.42));
+        assert_eq!(parsed.session_actual_cost_usd, Some(1.23));
+        assert_eq!(parsed.session_total_tokens_sent, Some(3_600));
+        assert_eq!(parsed.savings_history.len(), 1);
+    }
+
+    #[test]
+    fn parse_headroom_stats_history_reads_hourly_and_daily_rollups() {
+        let parsed = parse_headroom_stats_history_from_json(
+            r#"{
+                "lifetime": {
+                    "tokens_saved": 205,
+                    "compression_savings_usd": 0.205
+                },
+                "series": {
+                    "hourly": [
+                        {
+                            "timestamp": "2026-03-27T09:00:00Z",
+                            "tokens_saved": 150,
+                            "compression_savings_usd_delta": 0.15,
+                            "total_tokens_saved": 150,
+                            "compression_savings_usd": 0.15
+                        },
+                        {
+                            "timestamp": "2026-03-27T10:00:00Z",
+                            "tokens_saved": 25,
+                            "compression_savings_usd_delta": 0.025,
+                            "total_tokens_saved": 175,
+                            "compression_savings_usd": 0.175
+                        }
+                    ],
+                    "daily": [
+                        {
+                            "timestamp": "2026-03-27T00:00:00Z",
+                            "tokens_saved": 175,
+                            "compression_savings_usd_delta": 0.175,
+                            "total_tokens_saved": 175,
+                            "compression_savings_usd": 0.175
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("parsed history");
+
+        assert_eq!(parsed.lifetime_estimated_tokens_saved, Some(205));
+        assert_eq!(parsed.lifetime_estimated_savings_usd, Some(0.205));
+        assert_eq!(parsed.hourly.len(), 2);
+        assert_eq!(parsed.hourly[0].tokens_saved, 150);
+        assert!((parsed.hourly[0].compression_savings_usd_delta - 0.15).abs() < 1e-9);
+        assert_eq!(parsed.daily.len(), 1);
+
+        let daily_points = parsed.daily_savings();
+        assert_eq!(daily_points.len(), 1);
+        assert_eq!(daily_points[0].date, "2026-03-27");
+        assert_eq!(daily_points[0].estimated_tokens_saved, 175);
+        assert!((daily_points[0].estimated_savings_usd - 0.175).abs() < 1e-9);
+        assert_eq!(daily_points[0].actual_cost_usd, 0.0);
+        assert_eq!(daily_points[0].total_tokens_sent, 0);
+
+        let hourly_points = parsed.hourly_savings();
+        assert_eq!(hourly_points.len(), 2);
+        let expected_hour = Utc
+            .with_ymd_and_hms(2026, 3, 27, 9, 0, 0)
+            .single()
+            .expect("hour")
+            .with_timezone(&Local)
+            .format("%Y-%m-%dT%H:00")
+            .to_string();
+        assert_eq!(hourly_points[0].hour, expected_hour);
+        assert_eq!(hourly_points[0].estimated_tokens_saved, 150);
+        assert!((hourly_points[0].estimated_savings_usd - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_headroom_stats_accepts_naive_local_savings_history_timestamps() {
+        let parsed = parse_headroom_stats_from_json(
+            r#"{
+                "requests": { "total": 5 },
+                "tokens": {
+                    "input": 3600,
+                    "saved": 1200
+                },
+                "cost": {
+                    "compression_savings_usd": 0.42,
+                    "total_input_cost_usd": 0.08
+                },
+                "savings_history": [
+                    ["2026-03-24T11:52:00.866732", 1200]
+                ]
+            }"#,
+        )
+        .expect("parsed stats");
+
+        assert_eq!(parsed.savings_history.len(), 1);
+    }
+
+    #[test]
+    fn parse_headroom_stats_prefers_actual_input_cost_and_ignores_generic_total_cost() {
+        let parsed = parse_headroom_stats_from_json(
+            r#"{
+                "requests": { "total": 5 },
+                "tokens": {
+                    "saved": 1200,
+                    "actual_input_tokens": 3600
+                },
+                "cost": {
+                    "compression_savings_usd": 0.42,
+                    "actual_input_cost_usd": 0.08,
+                    "total_usd": 1.75
+                }
+            }"#,
+        )
+        .expect("parsed stats");
+
+        assert_eq!(parsed.session_actual_cost_usd, Some(0.08));
+        assert_eq!(parsed.session_total_tokens_sent, Some(3_600));
+    }
+
+    #[test]
+    fn parse_headroom_stats_reads_total_input_fields_from_stats_cost_block() {
+        let parsed = parse_headroom_stats_from_json(
+            r#"{
+                "requests": { "total": 5 },
+                "tokens": {
+                    "input": 3600,
+                    "saved": 1200
+                },
+                "cost": {
+                    "compression_savings_usd": 0.42,
+                    "total_input_cost_usd": 0.08,
+                    "cost_with_headroom_usd": 0.08
+                }
+            }"#,
+        )
+        .expect("parsed stats");
+
+        assert_eq!(parsed.session_actual_cost_usd, Some(0.08));
+        assert_eq!(parsed.session_total_tokens_sent, Some(3_600));
+    }
+
+    #[test]
+    fn parse_headroom_stats_does_not_derive_spend_when_actual_cost_is_missing() {
+        let parsed = parse_headroom_stats_from_json(
+            r#"{
+                "requests": { "total": 5 },
+                "tokens": {
+                    "saved": 1200,
+                    "total_after_compression": 3600
+                },
+                "cost": {
+                    "compression_savings_usd": 0.42,
+                    "total_usd": 1.75
+                }
+            }"#,
+        )
+        .expect("parsed stats");
+
+        assert_eq!(parsed.session_actual_cost_usd, None);
+        assert_eq!(parsed.session_total_tokens_sent, Some(3_600));
+    }
+
+    #[test]
+    fn parse_headroom_stats_does_not_derive_tokens_sent_when_missing() {
+        let parsed = parse_headroom_stats_from_json(
+            r#"{
+                "requests": { "total": 5 },
+                "tokens": {
+                    "saved": 1200,
+                    "savings_percent": 25.0
+                },
+                "cost": {
+                    "compression_savings_usd": 0.42,
+                    "actual_input_cost_usd": 0.08
+                }
+            }"#,
+        )
+        .expect("parsed stats");
+
+        assert_eq!(parsed.session_total_tokens_sent, None);
+        assert_eq!(parsed.session_actual_cost_usd, Some(0.08));
+    }
+
+    #[test]
+    fn first_observation_without_savings_history_does_not_invent_hourly_bucket_totals() {
+        let mut tracker = make_tracker();
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(4),
+                session_estimated_savings_usd: Some(0.5),
+                session_estimated_tokens_saved: Some(1_000),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.3),
+                session_total_tokens_sent: Some(3_000),
+                savings_history: Vec::new(),
+            })
+            .expect("snapshot");
+
+        assert!(tracker.hourly_savings().is_empty());
+        assert!(tracker.daily_savings().is_empty());
+    }
+
+    #[test]
+    fn spend_backfill_is_distributed_across_existing_session_hours() {
+        let mut tracker = make_tracker();
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(4),
+                session_estimated_savings_usd: Some(0.5),
+                session_estimated_tokens_saved: Some(1_000),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.0),
+                session_total_tokens_sent: Some(3_000),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 11, 0),
+                    history_point_at(2026, 3, 20, 12, 400),
+                    history_point_at(2026, 3, 21, 12, 1_000),
+                ],
+            })
+            .expect("first snapshot");
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(4),
+                session_estimated_savings_usd: Some(0.5),
+                session_estimated_tokens_saved: Some(1_000),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.3),
+                session_total_tokens_sent: Some(3_000),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 11, 0),
+                    history_point_at(2026, 3, 20, 12, 400),
+                    history_point_at(2026, 3, 21, 12, 1_000),
+                ],
+            })
+            .expect("second snapshot");
+
+        let daily = tracker.daily_savings();
+        assert_eq!(daily.len(), 2);
+        assert!((daily[0].actual_cost_usd - 0.12).abs() < 1e-9);
+        assert!((daily[1].actual_cost_usd - 0.18).abs() < 1e-9);
+    }
+
+    #[test]
+    fn incremental_updates_use_savings_history_hour_keys_instead_of_now() {
+        let mut tracker = make_tracker();
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(1),
+                session_estimated_savings_usd: Some(0.2),
+                session_estimated_tokens_saved: Some(400),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.12),
+                session_total_tokens_sent: Some(1_200),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 8, 0),
+                    history_point_at(2026, 3, 20, 9, 400),
+                ],
+            })
+            .expect("first snapshot");
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(2),
+                session_estimated_savings_usd: Some(0.5),
+                session_estimated_tokens_saved: Some(1_000),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.3),
+                session_total_tokens_sent: Some(3_000),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 9, 400),
+                    history_point_at(2026, 3, 20, 10, 1_000),
+                ],
+            })
+            .expect("second snapshot");
+
+        let hourly = tracker.hourly_savings();
+        let expected_first_hour = Utc
+            .with_ymd_and_hms(2026, 3, 20, 9, 0, 0)
+            .single()
+            .expect("first hour")
+            .with_timezone(&Local)
+            .format("%Y-%m-%dT%H:00")
+            .to_string();
+        let expected_second_hour = Utc
+            .with_ymd_and_hms(2026, 3, 20, 10, 0, 0)
+            .single()
+            .expect("second hour")
+            .with_timezone(&Local)
+            .format("%Y-%m-%dT%H:00")
+            .to_string();
+
+        assert_eq!(hourly.len(), 2);
+        assert_eq!(hourly[0].hour, expected_first_hour);
+        assert_eq!(hourly[0].estimated_tokens_saved, 400);
+        assert_eq!(hourly[1].hour, expected_second_hour);
+        assert_eq!(hourly[1].estimated_tokens_saved, 600);
+        assert_eq!(hourly[1].total_tokens_sent, 1_800);
+    }
+
+    #[test]
+    fn observing_repairs_stale_current_session_hourly_overlay() {
+        let mut tracker = make_tracker();
+        tracker.last_observation = Some(SavingsObservation {
+            observed_at: Utc::now(),
+            last_activity_at: Some(Utc::now()),
+            session_requests: 10,
+            session_estimated_savings_usd: 10.0,
+            session_estimated_tokens_saved: 10_000,
+            session_actual_cost_usd: 1.0,
+            session_total_tokens_sent: 5_000,
+        });
+        tracker.session_hourly_buckets.insert(
+            "2026-03-24T13:00".into(),
+            DailySavingsBucket {
+                estimated_savings_usd: 20.0,
+                estimated_tokens_saved: 6_000_000,
+                actual_cost_usd: 0.01,
+                total_tokens_sent: 600_000,
+            },
+        );
+        tracker.hourly_savings.insert(
+            "2026-03-24T13:00".into(),
+            DailySavingsBucket {
+                estimated_savings_usd: 20.0,
+                estimated_tokens_saved: 6_000_000,
+                actual_cost_usd: 0.01,
+                total_tokens_sent: 600_000,
+            },
+        );
+        tracker.daily_savings.insert(
+            "2026-03-24".into(),
+            DailySavingsBucket {
+                estimated_savings_usd: 20.0,
+                estimated_tokens_saved: 6_000_000,
+                actual_cost_usd: 0.01,
+                total_tokens_sent: 600_000,
+            },
+        );
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(11),
+                session_estimated_savings_usd: Some(10.1),
+                session_estimated_tokens_saved: Some(10_200),
+                session_savings_pct: Some(50.0),
+                session_actual_cost_usd: Some(1.01),
+                session_total_tokens_sent: Some(5_100),
+                savings_history: vec![
+                    history_point_at(2026, 3, 24, 11, 0),
+                    history_point_at(2026, 3, 24, 12, 10_200),
+                ],
+            })
+            .expect("snapshot");
+
+        let hourly = tracker.hourly_savings();
+        assert_eq!(hourly.len(), 1);
+        assert_eq!(hourly[0].estimated_tokens_saved, 10_200);
+        assert!((hourly[0].estimated_savings_usd - 10.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn persisted_session_history_prevents_rolling_window_from_reassigning_older_hour() {
+        let mut tracker = make_tracker();
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(2),
+                session_estimated_savings_usd: Some(0.5),
+                session_estimated_tokens_saved: Some(1_000),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.3),
+                session_total_tokens_sent: Some(3_000),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 8, 0),
+                    history_point_at(2026, 3, 20, 9, 400),
+                    history_point_at(2026, 3, 20, 10, 1_000),
+                ],
+            })
+            .expect("first snapshot");
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(3),
+                session_estimated_savings_usd: Some(0.6),
+                session_estimated_tokens_saved: Some(1_200),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.36),
+                session_total_tokens_sent: Some(3_600),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 10, 1_000),
+                    history_point_at(2026, 3, 20, 10, 1_200),
+                ],
+            })
+            .expect("second snapshot");
+
+        let hourly = tracker.hourly_savings();
+        assert_eq!(hourly.len(), 2);
+        assert_eq!(hourly[0].estimated_tokens_saved, 400);
+        assert_eq!(hourly[1].estimated_tokens_saved, 800);
+    }
+
+    #[test]
+    fn single_visible_history_point_does_not_invent_hourly_attribution() {
+        let mut tracker = make_tracker();
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(1),
+                session_estimated_savings_usd: Some(0.2),
+                session_estimated_tokens_saved: Some(400),
+                session_savings_pct: Some(25.0),
+                session_actual_cost_usd: Some(0.12),
+                session_total_tokens_sent: Some(1_200),
+                savings_history: vec![history_point_at(2026, 3, 20, 9, 400)],
+            })
+            .expect("snapshot");
+
+        assert!(tracker.hourly_savings().is_empty());
+        assert!(tracker.daily_savings().is_empty());
+    }
+
+    #[test]
+    fn visible_hours_only_get_attributable_tokens_sent_and_spend() {
+        let mut tracker = make_tracker();
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(5),
+                session_estimated_savings_usd: Some(10.0),
+                session_estimated_tokens_saved: Some(10_000),
+                session_savings_pct: Some(50.0),
+                session_actual_cost_usd: Some(4.0),
+                session_total_tokens_sent: Some(8_000),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 8, 7_000),
+                    history_point_at(2026, 3, 20, 9, 8_000),
+                    history_point_at(2026, 3, 20, 10, 10_000),
+                ],
+            })
+            .expect("snapshot");
+
+        let hourly = tracker.hourly_savings();
+        assert_eq!(hourly.len(), 2);
+        assert_eq!(hourly[0].estimated_tokens_saved, 1_000);
+        assert_eq!(hourly[1].estimated_tokens_saved, 2_000);
+        assert_eq!(hourly[0].total_tokens_sent, 800);
+        assert_eq!(hourly[1].total_tokens_sent, 1_600);
+        assert!((hourly[0].actual_cost_usd - 0.4).abs() < 1e-9);
+        assert!((hourly[1].actual_cost_usd - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rolling_window_does_not_dump_unattributable_remainder_into_last_hour() {
+        let mut tracker = make_tracker();
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(5),
+                session_estimated_savings_usd: Some(10.0),
+                session_estimated_tokens_saved: Some(10_000),
+                session_savings_pct: Some(50.0),
+                session_actual_cost_usd: Some(4.0),
+                session_total_tokens_sent: Some(8_000),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 8, 0),
+                    history_point_at(2026, 3, 20, 9, 4_000),
+                    history_point_at(2026, 3, 20, 10, 7_000),
+                ],
+            })
+            .expect("first snapshot");
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(6),
+                session_estimated_savings_usd: Some(10.0),
+                session_estimated_tokens_saved: Some(10_000),
+                session_savings_pct: Some(50.0),
+                session_actual_cost_usd: Some(4.0),
+                session_total_tokens_sent: Some(8_000),
+                savings_history: vec![
+                    history_point_at(2026, 3, 20, 10, 7_000),
+                    history_point_at(2026, 3, 20, 11, 10_000),
+                ],
+            })
+            .expect("second snapshot");
+
+        let hourly = tracker.hourly_savings();
+        assert_eq!(hourly.len(), 3);
+        assert_eq!(hourly[2].estimated_tokens_saved, 3_000);
+        assert_eq!(hourly[2].total_tokens_sent, 2_400);
+        assert!((hourly[2].actual_cost_usd - 1.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn missing_optional_spend_fields_do_not_trigger_session_reset() {
+        let mut tracker = make_tracker();
+
+        tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(10),
+                session_estimated_savings_usd: Some(1.0),
+                session_estimated_tokens_saved: Some(1_000),
+                session_savings_pct: Some(20.0),
+                session_actual_cost_usd: Some(4.0),
+                session_total_tokens_sent: Some(4_000),
+                savings_history: Vec::new(),
+            })
+            .expect("first snapshot");
+
+        let second = tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(11),
+                session_estimated_savings_usd: Some(1.2),
+                session_estimated_tokens_saved: Some(1_200),
+                session_savings_pct: Some(20.0),
+                session_actual_cost_usd: None,
+                session_total_tokens_sent: None,
+                savings_history: Vec::new(),
+            })
+            .expect("second snapshot");
+
+        assert!((second.lifetime_estimated_savings_usd - 1.2).abs() < 1e-9);
+        assert_eq!(second.lifetime_estimated_tokens_saved, 1_200);
+        assert_eq!(second.lifetime_requests, 11);
+    }
+
+    #[test]
+    fn overnight_inactivity_rolls_only_the_display_session() {
+        let mut tracker = make_tracker();
+        let now = Utc::now();
+        let prior_activity = (now - chrono::Duration::hours(2))
+            .with_timezone(&Local)
+            .date_naive()
+            .pred_opt()
+            .expect("prior day")
+            .and_hms_opt(23, 0, 0)
+            .expect("valid time")
+            .and_local_timezone(Local)
+            .single()
+            .expect("local timestamp")
+            .with_timezone(&Utc);
+
+        tracker.last_observation = Some(SavingsObservation {
+            observed_at: now - chrono::Duration::minutes(5),
+            last_activity_at: Some(prior_activity),
+            session_requests: 10,
+            session_estimated_savings_usd: 5.0,
+            session_estimated_tokens_saved: 1_000,
+            session_actual_cost_usd: 2.0,
+            session_total_tokens_sent: 4_000,
+        });
+        tracker.session_requests = 10;
+        tracker.session_estimated_savings_usd = 5.0;
+        tracker.session_estimated_tokens_saved = 1_000;
+        tracker.session_savings_pct = 20.0;
+        tracker.lifetime_requests = 10;
+        tracker.lifetime_estimated_savings_usd = 5.0;
+        tracker.lifetime_estimated_tokens_saved = 1_000;
+
+        let snapshot = tracker
+            .observe(&HeadroomDashboardStats {
+                session_requests: Some(11),
+                session_estimated_savings_usd: Some(5.5),
+                session_estimated_tokens_saved: Some(1_100),
+                session_savings_pct: Some(21.57),
+                session_actual_cost_usd: Some(2.4),
+                session_total_tokens_sent: Some(4_400),
+                savings_history: Vec::new(),
+            })
+            .expect("snapshot");
+
+        assert_eq!(snapshot.session_requests, 1);
+        assert_eq!(snapshot.session_estimated_tokens_saved, 100);
+        assert!((snapshot.session_estimated_savings_usd - 0.5).abs() < 1e-9);
+        assert!((snapshot.session_savings_pct - 20.0).abs() < 1e-9);
+        assert_eq!(snapshot.lifetime_requests, 11);
+        assert_eq!(snapshot.lifetime_estimated_tokens_saved, 1_100);
+    }
+
+    #[test]
+    fn load_or_create_ignores_old_persisted_snapshot_schema() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "headroom-savings-state-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        ensure_data_dirs(&base_dir).expect("create temp dirs");
+
+        std::fs::write(telemetry_file(&base_dir, "savings-records.jsonl"), "")
+            .expect("write empty journal");
+        let persisted = PersistedSavingsState {
+            schema_version: 1,
+            session_requests: 5,
+            session_estimated_savings_usd: 0.9,
+            session_estimated_tokens_saved: 900,
+            session_savings_pct: 18.0,
+            lifetime_requests: 12,
+            lifetime_estimated_savings_usd: 2.4,
+            lifetime_estimated_tokens_saved: 2_400,
+            last_observation: Some(SavingsObservation {
+                observed_at: Utc::now(),
+                last_activity_at: Some(Utc::now()),
+                session_requests: 5,
+                session_estimated_savings_usd: 0.9,
+                session_estimated_tokens_saved: 900,
+                session_actual_cost_usd: 0.0,
+                session_total_tokens_sent: 0,
+            }),
+            display_session_baseline: None,
+            session_savings_history: Vec::new(),
+            session_hourly_buckets: std::collections::BTreeMap::new(),
+            daily_savings: std::collections::BTreeMap::new(),
+            hourly_savings: std::collections::BTreeMap::new(),
+        };
+        std::fs::write(
+            config_file(&base_dir, "savings-state.json"),
+            serde_json::to_vec_pretty(&persisted).expect("serialize persisted state"),
+        )
+        .expect("write persisted state");
+
+        let tracker = SavingsTracker::load_or_create(&base_dir).expect("load tracker");
+        assert!((tracker.lifetime_estimated_savings_usd - 0.0).abs() < 1e-9);
+        assert_eq!(tracker.lifetime_estimated_tokens_saved, 0);
+        assert_eq!(tracker.lifetime_requests, 0);
+
+        let _ = std::fs::remove_dir_all(base_dir);
+    }
+
+    fn daily(date: &str, tokens: u64, usd: f64) -> DailySavingsPoint {
+        DailySavingsPoint {
+            date: date.to_string(),
+            estimated_tokens_saved: tokens,
+            estimated_savings_usd: usd,
+            actual_cost_usd: 0.0,
+            total_tokens_sent: 0,
+        }
+    }
+
+    fn hourly(hour: &str, tokens: u64) -> HourlySavingsPoint {
+        HourlySavingsPoint {
+            hour: hour.to_string(),
+            estimated_tokens_saved: tokens,
+            estimated_savings_usd: 0.0,
+            actual_cost_usd: 0.0,
+            total_tokens_sent: 0,
+        }
+    }
+
+    // merge_daily_savings
+
+    #[test]
+    fn merge_daily_tracker_preferred_before_cutoff() {
+        let tracker = vec![daily("2026-04-13", 500, 1.0)];
+        let history = vec![daily("2026-04-13", 999, 2.0)];
+        let result = merge_daily_savings(tracker, history, "2026-04-20");
+        assert_eq!(result.len(), 1);
+        // tracker wins pre-cutoff
+        assert_eq!(result[0].estimated_tokens_saved, 500);
+    }
+
+    #[test]
+    fn merge_daily_history_preferred_on_and_after_cutoff() {
+        let tracker = vec![daily("2026-04-20", 100, 0.5)];
+        let history = vec![daily("2026-04-20", 800, 2.0)];
+        let result = merge_daily_savings(tracker, history, "2026-04-20");
+        assert_eq!(result.len(), 1);
+        // history wins on cutoff date
+        assert_eq!(result[0].estimated_tokens_saved, 800);
+    }
+
+    #[test]
+    fn merge_daily_fallback_when_only_tracker_has_post_cutoff_day() {
+        let tracker = vec![daily("2026-04-21", 300, 1.2)];
+        let result = merge_daily_savings(tracker, vec![], "2026-04-20");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].estimated_tokens_saved, 300);
+    }
+
+    #[test]
+    fn merge_daily_drops_history_pre_cutoff() {
+        // Pre-cutoff is tracker-only: empty tracker + pre-cutoff history => no entry.
+        // This protects against pre-v6 schema drift leaking into the graph.
+        let history = vec![daily("2026-04-10", 400, 1.5)];
+        let result = merge_daily_savings(vec![], history, "2026-04-20");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn merge_daily_combines_days_from_both_sources() {
+        let tracker = vec![daily("2026-04-10", 200, 0.8), daily("2026-04-13", 300, 1.0)];
+        let history = vec![daily("2026-04-20", 500, 2.0), daily("2026-04-21", 600, 2.5)];
+        let mut result = merge_daily_savings(tracker, history, "2026-04-20");
+        result.sort_by(|a, b| a.date.cmp(&b.date));
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].date, "2026-04-10");
+        assert_eq!(result[3].date, "2026-04-21");
+    }
+
+    // merge_hourly_savings
+
+    #[test]
+    fn merge_hourly_tracker_preferred_before_cutoff() {
+        let tracker = vec![hourly("2026-04-13T10:00", 500)];
+        let history = vec![hourly("2026-04-13T10:00", 999)];
+        let result = merge_hourly_savings(tracker, history, "2026-04-20T00:00");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].estimated_tokens_saved, 500);
+    }
+
+    #[test]
+    fn merge_hourly_history_preferred_on_and_after_cutoff() {
+        let tracker = vec![hourly("2026-04-20T09:00", 100)];
+        let history = vec![hourly("2026-04-20T09:00", 800)];
+        let result = merge_hourly_savings(tracker, history, "2026-04-20T00:00");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].estimated_tokens_saved, 800);
+    }
+
+    #[test]
+    fn merge_hourly_drops_history_pre_cutoff() {
+        // Pre-cutoff is tracker-only: empty tracker + pre-cutoff history => no entries.
+        let tracker: Vec<HourlySavingsPoint> = vec![];
+        let history = vec![
+            hourly("2026-04-13T09:00", 400),
+            hourly("2026-04-13T10:00", 600),
+        ];
+        let result = merge_hourly_savings(tracker, history, "2026-04-20T00:00");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn tracker_observe_called_updates_hourly_savings_even_with_history_present() {
+        // Regression: tracker.observe() must be called regardless of whether native
+        // history is available, so that hourly buckets stay current.
+        let today = chrono::Local::now();
+        let hp = |hour: u32, total: u64| -> HeadroomSavingsHistoryPoint {
+            history_point_at(today.year(), today.month(), today.day(), hour, total)
+        };
+        let mut tracker = make_tracker();
+
+        // First observation: 1_000 tokens saved, history shows 0→1_000 across hours 9→10.
+        tracker.observe(&HeadroomDashboardStats {
+            session_requests: Some(1),
+            session_estimated_savings_usd: Some(1.0),
+            session_estimated_tokens_saved: Some(1_000),
+            session_savings_pct: Some(30.0),
+            session_actual_cost_usd: Some(0.5),
+            session_total_tokens_sent: Some(3_000),
+            savings_history: vec![hp(9, 0), hp(10, 1_000)],
+        });
+        let total_first: u64 = tracker
+            .hourly_savings()
+            .iter()
+            .map(|p| p.estimated_tokens_saved)
+            .sum();
+
+        // Second observation: 3_000 tokens saved, history adds hour 11.
+        tracker.observe(&HeadroomDashboardStats {
+            session_requests: Some(3),
+            session_estimated_savings_usd: Some(3.0),
+            session_estimated_tokens_saved: Some(3_000),
+            session_savings_pct: Some(30.0),
+            session_actual_cost_usd: Some(1.5),
+            session_total_tokens_sent: Some(9_000),
+            savings_history: vec![hp(9, 0), hp(10, 1_000), hp(11, 3_000)],
+        });
+        let total_second: u64 = tracker
+            .hourly_savings()
+            .iter()
+            .map(|p| p.estimated_tokens_saved)
+            .sum();
+
+        assert!(
+            total_second > total_first,
+            "hourly savings should grow with each observe call: first={total_first} second={total_second}"
+        );
+    }
+
+    fn idle_progress() -> BootstrapProgress {
+        BootstrapProgress {
+            running: false,
+            complete: false,
+            failed: false,
+            current_step: String::new(),
+            message: String::new(),
+            current_step_eta_seconds: 0,
+            overall_percent: 0,
+        }
+    }
+
+    #[test]
+    fn begin_bootstrap_skips_install_when_python_already_installed() {
+        let (next, result) = begin_bootstrap_transition(&idle_progress(), true);
+        assert!(result.is_ok());
+        assert!(next.complete);
+        assert!(!next.running);
+        assert!(!next.failed);
+        assert_eq!(next.overall_percent, 100);
+    }
+
+    #[test]
+    fn begin_bootstrap_starts_when_python_missing() {
+        let (next, result) = begin_bootstrap_transition(&idle_progress(), false);
+        assert!(result.is_ok());
+        assert!(next.running);
+        assert!(!next.complete);
+        assert!(!next.failed);
+        assert_eq!(next.overall_percent, 2);
+    }
+
+    #[test]
+    fn begin_bootstrap_rejects_reentry_while_running() {
+        let running = BootstrapProgress {
+            running: true,
+            overall_percent: 42,
+            ..idle_progress()
+        };
+        let (next, result) = begin_bootstrap_transition(&running, false);
+        assert!(result.is_err());
+        // State is preserved when re-entry is rejected.
+        assert_eq!(next.overall_percent, 42);
+        assert!(next.running);
+    }
+
+    #[test]
+    fn begin_bootstrap_after_failure_restarts_cleanly() {
+        let failed = BootstrapProgress {
+            failed: true,
+            overall_percent: 50,
+            message: "boom".into(),
+            ..idle_progress()
+        };
+        let (next, result) = begin_bootstrap_transition(&failed, false);
+        assert!(result.is_ok());
+        assert!(next.running);
+        assert!(!next.failed);
+        assert_eq!(next.overall_percent, 2);
+    }
+
+    #[test]
+    fn apply_step_normalizes_into_running_state() {
+        let failed = BootstrapProgress {
+            failed: true,
+            ..idle_progress()
+        };
+        let next = apply_bootstrap_step(
+            &failed,
+            BootstrapStepUpdate {
+                step: "Downloading Python",
+                message: "Fetching runtime".into(),
+                eta_seconds: 30,
+                percent: 40,
+            },
+        );
+        assert!(next.running);
+        assert!(!next.failed);
+        assert!(!next.complete);
+        assert_eq!(next.current_step, "Downloading Python");
+        assert_eq!(next.overall_percent, 40);
+        assert_eq!(next.current_step_eta_seconds, 30);
+    }
+
+    #[test]
+    fn complete_state_pins_to_full_progress() {
+        let next = bootstrap_complete_state();
+        assert!(next.complete);
+        assert!(!next.running);
+        assert!(!next.failed);
+        assert_eq!(next.overall_percent, 100);
+    }
+
+    #[test]
+    fn failed_state_preserves_current_percent_with_min_of_one() {
+        let current = BootstrapProgress {
+            running: true,
+            overall_percent: 72,
+            ..idle_progress()
+        };
+        let next = bootstrap_failed_state(&current, "download error".into());
+        assert!(next.failed);
+        assert!(!next.running);
+        assert!(!next.complete);
+        assert_eq!(next.overall_percent, 72);
+        assert_eq!(next.message, "download error");
+    }
+
+    #[test]
+    fn failed_state_floors_zero_percent_to_one() {
+        let next = bootstrap_failed_state(&idle_progress(), "early failure".into());
+        assert_eq!(next.overall_percent, 1);
+        assert!(next.failed);
+    }
+}

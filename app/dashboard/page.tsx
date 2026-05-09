@@ -2,7 +2,7 @@ import { auth } from '@/auth';
 import { db } from '@/lib/db';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { Wand2, Link2, FileText, CheckCircle, Clock, TrendingUp, AlertCircle } from 'lucide-react';
+import { Wand2, Link2, FileText, CheckCircle, Clock, TrendingUp, AlertCircle, Eye, Edit } from 'lucide-react';
 
 export default async function DashboardPage() {
   const session = await auth();
@@ -25,16 +25,26 @@ export default async function DashboardPage() {
   const pending = await db.donnaInquiry.count({ where: { userId, status: 'EMAILED' } });
 
   const firstName = session.user.name?.split(' ')[0] ?? 'Peguam';
+  const fullName = session.user.name?.toUpperCase() ?? 'PEGUAM';
+
+  // Dynamic tips for Donna AI
+  const donnaTips = [
+    'Donna AI membantu anda menguruskan pertanyaan dengan lebih efisien',
+    'Gunakan tetapan automatik untuk menjimatkan masa anda',
+    'Pantai statistik pertanyaan untuk meningkatkan kadar penukaran',
+    'Donna AI boleh menapis pertanyaan mengikut kawasan amalan anda'
+  ];
+  const randomTip = donnaTips[Math.floor(Math.random() * donnaTips.length)];
 
   return (
     <div className="p-8 max-w-5xl">
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl font-display font-semibold text-text-primary mb-1">
-          Selamat datang, {firstName}
+          Selamat datang, {fullName}
         </h1>
         <p className="text-text-secondary text-sm">
-          Panel kawalan Donna AI anda
+          {randomTip}
         </p>
       </div>
 
@@ -60,12 +70,92 @@ export default async function DashboardPage() {
         </div>
       )}
 
+      {/* Conversion Graph */}
+      <div className="mb-8">
+        <h2 className="text-base font-semibold text-text-primary mb-4">Konversi Pertanyaan</h2>
+        <div className="glass-card rounded-2xl p-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="text-center">
+              <div className="text-3xl font-bold text-gold mb-2">{totalInquiries}</div>
+              <div className="text-sm text-text-muted">Jumlah Pertanyaan</div>
+            </div>
+            <div className="text-center">
+              <div className="text-3xl font-bold text-[#fb923c] mb-2">{pending}</div>
+              <div className="text-sm text-text-muted">Menunggu Semakan</div>
+            </div>
+            <div className="text-center">
+              <div className="text-3xl font-bold text-[#34d399] mb-2">
+                {totalInquiries > 0 ? Math.round((accepted / totalInquiries) * 100) : 0}%
+              </div>
+              <div className="text-sm text-text-muted">Kadar Penerimaan</div>
+            </div>
+          </div>
+          
+          {/* Simple conversion bar */}
+          <div className="mt-6">
+            <div className="flex items-center justify-between text-xs text-text-muted mb-2">
+              <span>Pertanyaan → Menunggu Semakan</span>
+              <span>{totalInquiries > 0 ? Math.round((pending / totalInquiries) * 100) : 0}%</span>
+            </div>
+            <div className="w-full bg-bg-3 rounded-full h-2 overflow-hidden">
+              <div className="flex h-full">
+                <div 
+                  className="bg-gold transition-all duration-500" 
+                  style={{ width: `${totalInquiries > 0 ? (pending / totalInquiries) * 100 : 0}%` }}
+                />
+                <div className="bg-bg-3 flex-1" />
+              </div>
+            </div>
+            
+            <div className="flex items-center justify-between text-xs text-text-muted mb-2 mt-4">
+              <span>Menunggu Semakan → Diterima</span>
+              <span>{pending > 0 ? Math.round((accepted / pending) * 100) : 0}%</span>
+            </div>
+            <div className="w-full bg-bg-3 rounded-full h-2 overflow-hidden">
+              <div className="flex h-full">
+                <div 
+                  className="bg-[#fb923c] transition-all duration-500" 
+                  style={{ width: `${pending > 0 ? (accepted / pending) * 100 : 0}%` }}
+                />
+                <div className="bg-bg-3 flex-1" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Stats grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <StatCard label="Jumlah Pertanyaan" value={totalInquiries} icon={FileText} color="gold" />
-        <StatCard label="Diterima" value={accepted} icon={CheckCircle} color="green" />
-        <StatCard label="Menunggu Semakan" value={pending} icon={Clock} color="amber" />
-        <StatCard label="Bridge Aktif" value={bridges} icon={Link2} color="purple" />
+        <StatCard 
+          label="Jumlah Pertanyaan" 
+          value={totalInquiries} 
+          icon={FileText} 
+          color="gold" 
+          observeHref="/dashboard/donna/logs"
+        />
+        <StatCard 
+          label="Diterima" 
+          value={accepted} 
+          icon={CheckCircle} 
+          color="green" 
+          observeHref="/dashboard/donna/logs?status=ACCEPTED"
+        />
+        <StatCard 
+          label="Menunggu Semakan" 
+          value={pending} 
+          icon={Clock} 
+          color="amber" 
+          observeHref="/dashboard/donna/logs?status=EMAILED"
+          editHref="/dashboard/donna/settings"
+        />
+        <StatCard 
+          label="Bridge Aktif" 
+          value={bridges} 
+          icon={Link2} 
+          color="purple" 
+          observeHref="/dashboard/donna/bridge"
+          editHref="/dashboard/donna/bridge"
+        />
       </div>
 
       {/* Quick links */}
@@ -132,11 +222,13 @@ export default async function DashboardPage() {
   );
 }
 
-function StatCard({ label, value, icon: Icon, color }: {
+function StatCard({ label, value, icon: Icon, color, observeHref, editHref }: {
   label: string;
   value: number;
   icon: React.ElementType;
   color: 'gold' | 'green' | 'amber' | 'purple';
+  observeHref?: string;
+  editHref?: string;
 }) {
   const colors = {
     gold: 'text-gold border-border-gold bg-[rgba(212,168,83,0.06)]',
@@ -145,12 +237,34 @@ function StatCard({ label, value, icon: Icon, color }: {
     purple: 'text-lia-light border-lia-border bg-lia-dim',
   };
   return (
-    <div className={`rounded-2xl border p-5 ${colors[color]}`}>
+    <div className={`rounded-2xl border p-5 ${colors[color]} relative group`}>
       <div className="flex items-center justify-between mb-3">
         <Icon size={18} />
         <span className="text-2xl font-bold">{value}</span>
       </div>
-      <p className="text-xs font-medium opacity-80">{label}</p>
+      <p className="text-xs font-medium opacity-80 mb-3">{label}</p>
+      
+      {/* Observe and Edit buttons */}
+      <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+        {observeHref && (
+          <Link 
+            href={observeHref}
+            className="flex items-center gap-1 text-xs bg-bg-2/80 hover:bg-bg-2 px-2 py-1 rounded transition-colors"
+            title="Lihat"
+          >
+            <Eye size={12} />
+          </Link>
+        )}
+        {editHref && (
+          <Link 
+            href={editHref}
+            className="flex items-center gap-1 text-xs bg-bg-2/80 hover:bg-bg-2 px-2 py-1 rounded transition-colors"
+            title="Edit"
+          >
+            <Edit size={12} />
+          </Link>
+        )}
+      </div>
     </div>
   );
 }

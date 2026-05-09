@@ -27,9 +27,11 @@ export function Sidebar() {
       {/* Logo */}
       <div className="px-6 py-5 border-b border-border">
         <Link href="/dashboard" className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#7c3aed] to-[#4f46e5] flex items-center justify-center">
-            <span className="text-white font-display font-semibold text-sm">T</span>
-          </div>
+          <img 
+            src="/logo.png" 
+            alt="TanyaPeguam Logo" 
+            className="w-8 h-8 rounded-lg object-cover"
+          />
           <div>
             <span className="block text-sm font-bold text-text-primary tracking-tight">TanyaPeguam</span>
             <span className="block text-[10px] text-text-muted uppercase tracking-widest">Dashboard</span>

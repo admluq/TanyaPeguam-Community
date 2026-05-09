@@ -1,0 +1,44 @@
+{
+  "name": "headroom-desktop",
+  "version": "0.3.11",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "build:mac:dmg": "./scripts/build-macos-dmg.sh",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:frontend": "vitest run",
+    "test:coverage": "vitest run --coverage.enabled --coverage.provider=v8",
+    "test:desktop": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:all": "npm run test:frontend && npm run test:desktop",
+    "release:check": "./scripts/verify-release.sh",
+    "check:colors": "./scripts/check-colors.sh"
+  },
+  "dependencies": {
+    "@microsoft/clarity": "^1.0.2",
+    "@phosphor-icons/react": "^2.1.10",
+    "@sentry/react": "^10.47.0",
+    "@tauri-apps/api": "^2.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^3.8.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^6.0.1",
+    "@vitest/coverage-v8": "^4.1.2",
+    "jsdom": "^29.0.2",
+    "postcss": "^8.5.10",
+    "typescript": "^5.6.3",
+    "vite": "^8.0.10",
+    "vitest": "^4.1.2"
+  }
+}

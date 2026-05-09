@@ -37,7 +37,7 @@ const HOURS_PRESETS = [
 ];
 
 const STEPS = [
-  { id: 1, label: 'Kawasan Amalan' },
+  { id: 1, label: 'Bidang Amalan' },
   { id: 2, label: 'Bidang Kuasa' },
   { id: 3, label: 'Waktu & Yuran' },
   { id: 4, label: 'Peraturan Triage' },
@@ -47,11 +47,17 @@ const STEPS = [
 type FormData = {
   practiceAreas: string[];
   jurisdiction: string;
-  barCouncil: string;
+  barCouncil: string[];
   hoursPreset: number;
   firstConsultMode: 'free' | 'paid';
   consultFee: string;
   urgencyFee: string;
+  showVideoMeetingFees: boolean;
+  videoMeetingFee: string;
+  videoMeetingUrgencyFee: string;
+  showPhysicalMeetingFees: boolean;
+  physicalMeetingFee: string;
+  physicalMeetingUrgencyFee: string;
   sensitivityLevel: number;
   deflectPatterns: string[];
   emailTo: string;
@@ -63,17 +69,23 @@ type FormData = {
 const DEFAULTS: FormData = {
   practiceAreas: [],
   jurisdiction: '',
-  barCouncil: 'WP',
+  barCouncil: ['WP'],
   hoursPreset: 0,
   firstConsultMode: 'paid',
   consultFee: '50',
   urgencyFee: '150',
+  showVideoMeetingFees: false,
+  videoMeetingFee: '100',
+  videoMeetingUrgencyFee: '300',
+  showPhysicalMeetingFees: false,
+  physicalMeetingFee: '200',
+  physicalMeetingUrgencyFee: '500',
   sensitivityLevel: 5,
   deflectPatterns: [],
   emailTo: '',
-  lowTierLabel: 'Konsultasi (RM50)',
-  medTierLabel: 'Web Call',
-  highTierLabel: 'Temujanji',
+  lowTierLabel: 'Pertanyaan umum, semakan pantas',
+  medTierLabel: 'Pertanyaan khusus, semakan peguam perlu kemaskini',
+  highTierLabel: 'Pertanyaan kompleks, semakan peguam perlu teliti dan kemaskini',
 };
 
 export function SetupWizard({ initial, userEmail }: {
@@ -89,6 +101,7 @@ export function SetupWizard({ initial, userEmail }: {
     ...initial,
   });
   const [newPattern, setNewPattern] = useState('');
+  const [newPracticeArea, setNewPracticeArea] = useState('');
 
   function update<K extends keyof FormData>(key: K, value: FormData[K]) {
     setData((prev) => ({ ...prev, [key]: value }));
@@ -103,12 +116,40 @@ export function SetupWizard({ initial, userEmail }: {
     }));
   }
 
+  function addPracticeArea() {
+    const area = newPracticeArea.trim();
+    if (area && !data.practiceAreas.includes(area)) {
+      setData((prev) => ({
+        ...prev,
+        practiceAreas: [...prev.practiceAreas, area],
+      }));
+      setNewPracticeArea('');
+    }
+  }
+
   function addPattern() {
     const p = newPattern.trim();
     if (p && !data.deflectPatterns.includes(p)) {
       update('deflectPatterns', [...data.deflectPatterns, p]);
     }
     setNewPattern('');
+  }
+
+  function toggleBarCouncil(value: string) {
+    setData((prev) => ({
+      ...prev,
+      barCouncil: prev.barCouncil.includes(value)
+        ? prev.barCouncil.filter((c) => c !== value)
+        : [...prev.barCouncil, value],
+    }));
+  }
+
+  function toggleVideoMeetingFees() {
+    setData((prev) => ({ ...prev, showVideoMeetingFees: !prev.showVideoMeetingFees }));
+  }
+
+  function togglePhysicalMeetingFees() {
+    setData((prev) => ({ ...prev, showPhysicalMeetingFees: !prev.showPhysicalMeetingFees }));
   }
 
   function removePattern(p: string) {
@@ -172,14 +213,20 @@ export function SetupWizard({ initial, userEmail }: {
       {/* Step content */}
       <div className="glass-card rounded-2xl p-8 mb-6">
         {step === 1 && (
-          <Step1 practiceAreas={data.practiceAreas} toggle={toggleArea} />
+          <Step1 
+            practiceAreas={data.practiceAreas} 
+            toggle={toggleArea}
+            newPracticeArea={newPracticeArea}
+            setNewPracticeArea={setNewPracticeArea}
+            addPracticeArea={addPracticeArea}
+          />
         )}
         {step === 2 && (
           <Step2
             jurisdiction={data.jurisdiction}
             barCouncil={data.barCouncil}
             onJurisdiction={(v) => update('jurisdiction', v)}
-            onBarCouncil={(v) => update('barCouncil', v)}
+            onBarCouncil={toggleBarCouncil}
           />
         )}
         {step === 3 && (
@@ -188,10 +235,22 @@ export function SetupWizard({ initial, userEmail }: {
             firstConsultMode={data.firstConsultMode}
             consultFee={data.consultFee}
             urgencyFee={data.urgencyFee}
+            showVideoMeetingFees={data.showVideoMeetingFees}
+            videoMeetingFee={data.videoMeetingFee}
+            videoMeetingUrgencyFee={data.videoMeetingUrgencyFee}
+            showPhysicalMeetingFees={data.showPhysicalMeetingFees}
+            physicalMeetingFee={data.physicalMeetingFee}
+            physicalMeetingUrgencyFee={data.physicalMeetingUrgencyFee}
             onHoursPreset={(v) => update('hoursPreset', v)}
             onConsultMode={(v) => update('firstConsultMode', v)}
             onConsultFee={(v) => update('consultFee', v)}
             onUrgencyFee={(v) => update('urgencyFee', v)}
+            onToggleVideoMeetingFees={toggleVideoMeetingFees}
+            onTogglePhysicalMeetingFees={togglePhysicalMeetingFees}
+            onVideoMeetingFee={(v) => update('videoMeetingFee', v)}
+            onVideoMeetingUrgencyFee={(v) => update('videoMeetingUrgencyFee', v)}
+            onPhysicalMeetingFee={(v) => update('physicalMeetingFee', v)}
+            onPhysicalMeetingUrgencyFee={(v) => update('physicalMeetingUrgencyFee', v)}
           />
         )}
         {step === 4 && (
@@ -249,11 +308,17 @@ export function SetupWizard({ initial, userEmail }: {
 
 // ── Step 1: Practice areas ──────────────────────────────
 
-function Step1({ practiceAreas, toggle }: { practiceAreas: string[]; toggle: (a: string) => void }) {
+function Step1({ practiceAreas, toggle, newPracticeArea, setNewPracticeArea, addPracticeArea }: { 
+  practiceAreas: string[]; 
+  toggle: (a: string) => void;
+  newPracticeArea: string;
+  setNewPracticeArea: (v: string) => void;
+  addPracticeArea: () => void;
+}) {
   return (
     <div>
-      <h2 className="text-lg font-semibold text-text-primary mb-1">Kawasan Amalan</h2>
-      <p className="text-sm text-text-secondary mb-6">Pilih kawasan yang Donna akan terima pertanyaan.</p>
+      <h2 className="text-lg font-semibold text-text-primary mb-1">Bidang Amalan</h2>
+      <p className="text-sm text-text-secondary mb-6">Pilih bidang amalan yang Donna akan terima</p>
       <div className="grid grid-cols-2 gap-2.5">
         {PRACTICE_AREAS.map((area) => {
           const selected = practiceAreas.includes(area);
@@ -277,6 +342,59 @@ function Step1({ practiceAreas, toggle }: { practiceAreas: string[]; toggle: (a:
           );
         })}
       </div>
+      
+      {/* Other practice area input */}
+      <div className="mt-4">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={newPracticeArea}
+            onChange={(e) => setNewPracticeArea(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addPracticeArea(); } }}
+            placeholder="Tambah kawasan amalan lain..."
+            className="flex-1 bg-bg-3 border border-border rounded-xl px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-lia transition-colors"
+          />
+          <button
+            onClick={addPracticeArea}
+            disabled={!newPracticeArea.trim()}
+            className="px-4 py-2.5 bg-lia hover:bg-lia/90 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium text-sm rounded-xl transition-colors"
+          >
+            Tambah
+          </button>
+        </div>
+      </div>
+      
+      {/* Selected practice areas list */}
+      {practiceAreas.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-sm font-medium text-text-primary mb-3">Bidang amalan dipilih:</h3>
+          <div className="flex flex-wrap gap-2">
+            {practiceAreas.map((area, index) => {
+              const isCustom = !PRACTICE_AREAS.includes(area);
+              return (
+                <div
+                  key={index}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm ${
+                    isCustom 
+                      ? 'bg-lia-dim border-lia-border text-lia-light' 
+                      : 'bg-bg-3 border-border text-text-secondary'
+                  }`}
+                >
+                  <span>{area}</span>
+                  <button
+                    onClick={() => toggle(area)}
+                    className="text-text-muted hover:text-[#f87171] transition-colors"
+                    title="Buang"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      
       {practiceAreas.length === 0 && (
         <p className="text-xs text-[#fb923c] mt-3">Pilih sekurang-kurangnya satu kawasan amalan.</p>
       )}
@@ -287,7 +405,7 @@ function Step1({ practiceAreas, toggle }: { practiceAreas: string[]; toggle: (a:
 // ── Step 2: Jurisdiction ────────────────────────────────
 
 function Step2({ jurisdiction, barCouncil, onJurisdiction, onBarCouncil }: {
-  jurisdiction: string; barCouncil: string;
+  jurisdiction: string; barCouncil: string[];
   onJurisdiction: (v: string) => void; onBarCouncil: (v: string) => void;
 }) {
   return (
@@ -311,21 +429,23 @@ function Step2({ jurisdiction, barCouncil, onJurisdiction, onBarCouncil }: {
         <div>
           <label className="block text-sm font-medium text-text-primary mb-2">Badan Peguam</label>
           <div className="space-y-2">
-            {BAR_COUNCILS.map((b) => (
-              <label key={b.value} className={`flex items-center gap-3 p-3.5 rounded-xl border cursor-pointer transition-all ${
-                barCouncil === b.value ? 'border-lia-border bg-lia-dim' : 'border-border hover:border-border-hover'
-              }`}>
-                <input
-                  type="radio"
-                  name="barCouncil"
-                  value={b.value}
-                  checked={barCouncil === b.value}
-                  onChange={() => onBarCouncil(b.value)}
-                  className="accent-lia"
-                />
-                <span className="text-sm text-text-primary">{b.label}</span>
-              </label>
-            ))}
+            {BAR_COUNCILS.map((b) => {
+              const selected = barCouncil.includes(b.value);
+              return (
+                <label key={b.value} className={`flex items-center gap-3 p-3.5 rounded-xl border cursor-pointer transition-all ${
+                  selected ? 'border-lia-border bg-lia-dim' : 'border-border hover:border-border-hover'
+                }`}>
+                  <input
+                    type="checkbox"
+                    value={b.value}
+                    checked={selected}
+                    onChange={() => onBarCouncil(b.value)}
+                    className="accent-lia rounded"
+                  />
+                  <span className="text-sm text-text-primary">{b.label}</span>
+                </label>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -335,10 +455,15 @@ function Step2({ jurisdiction, barCouncil, onJurisdiction, onBarCouncil }: {
 
 // ── Step 3: Availability & fees ─────────────────────────
 
-function Step3({ hoursPreset, firstConsultMode, consultFee, urgencyFee, onHoursPreset, onConsultMode, onConsultFee, onUrgencyFee }: {
+function Step3({ hoursPreset, firstConsultMode, consultFee, urgencyFee, showVideoMeetingFees, videoMeetingFee, videoMeetingUrgencyFee, showPhysicalMeetingFees, physicalMeetingFee, physicalMeetingUrgencyFee, onHoursPreset, onConsultMode, onConsultFee, onUrgencyFee, onToggleVideoMeetingFees, onTogglePhysicalMeetingFees, onVideoMeetingFee, onVideoMeetingUrgencyFee, onPhysicalMeetingFee, onPhysicalMeetingUrgencyFee }: {
   hoursPreset: number; firstConsultMode: 'free' | 'paid'; consultFee: string; urgencyFee: string;
+  showVideoMeetingFees: boolean; videoMeetingFee: string; videoMeetingUrgencyFee: string;
+  showPhysicalMeetingFees: boolean; physicalMeetingFee: string; physicalMeetingUrgencyFee: string;
   onHoursPreset: (v: number) => void; onConsultMode: (v: 'free' | 'paid') => void;
   onConsultFee: (v: string) => void; onUrgencyFee: (v: string) => void;
+  onToggleVideoMeetingFees: () => void; onTogglePhysicalMeetingFees: () => void;
+  onVideoMeetingFee: (v: string) => void; onVideoMeetingUrgencyFee: (v: string) => void;
+  onPhysicalMeetingFee: (v: string) => void; onPhysicalMeetingUrgencyFee: (v: string) => void;
 }) {
   return (
     <div>
@@ -375,25 +500,98 @@ function Step3({ hoursPreset, firstConsultMode, consultFee, urgencyFee, onHoursP
         </div>
 
         {firstConsultMode === 'paid' && (
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-text-secondary mb-1.5">Yuran Konsultasi (RM)</label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted text-sm">RM</span>
-                <input
-                  type="number" value={consultFee} onChange={(e) => onConsultFee(e.target.value)}
-                  className="w-full bg-bg-3 border border-border rounded-xl pl-9 pr-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors"
-                />
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-text-secondary mb-1.5">Yuran Konsultasi (RM)</label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted text-sm">RM</span>
+                  <input
+                    type="number" value={consultFee} onChange={(e) => onConsultFee(e.target.value)}
+                    className="w-full bg-bg-3 border border-border rounded-xl pl-9 pr-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-text-secondary mb-1.5">Yuran Kecemasan (RM)</label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted text-sm">RM</span>
+                  <input
+                    type="number" value={urgencyFee} onChange={(e) => onUrgencyFee(e.target.value)}
+                    className="w-full bg-bg-3 border border-border rounded-xl pl-9 pr-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors"
+                  />
+                </div>
               </div>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-text-secondary mb-1.5">Yuran Kecemasan (RM)</label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted text-sm">RM</span>
-                <input
-                  type="number" value={urgencyFee} onChange={(e) => onUrgencyFee(e.target.value)}
-                  className="w-full bg-bg-3 border border-border rounded-xl pl-9 pr-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors"
-                />
+
+            {/* Additional Fee Types */}
+            <div className="space-y-4">
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={onToggleVideoMeetingFees}
+                  className="text-left text-sm text-lia hover:text-lia/80 transition-colors underline"
+                >
+                  {showVideoMeetingFees ? 'Remove' : 'Add'} Yuran Video Meeting / Video Meeting Kecemasan
+                </button>
+                
+                {showVideoMeetingFees && (
+                  <div className="grid grid-cols-2 gap-4 ml-4">
+                    <div>
+                      <label className="block text-xs font-medium text-text-secondary mb-1.5">Video Meeting (RM)</label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted text-sm">RM</span>
+                        <input
+                          type="number" value={videoMeetingFee} onChange={(e) => onVideoMeetingFee(e.target.value)}
+                          className="w-full bg-bg-3 border border-border rounded-xl pl-9 pr-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-text-secondary mb-1.5">Video Meeting Kecemasan (RM)</label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted text-sm">RM</span>
+                        <input
+                          type="number" value={videoMeetingUrgencyFee} onChange={(e) => onVideoMeetingUrgencyFee(e.target.value)}
+                          className="w-full bg-bg-3 border border-border rounded-xl pl-9 pr-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={onTogglePhysicalMeetingFees}
+                  className="text-left text-sm text-lia hover:text-lia/80 transition-colors underline"
+                >
+                  {showPhysicalMeetingFees ? 'Remove' : 'Add'} Yuran Meeting Fizikal / Meeting Fizikal Kecemasan
+                </button>
+                
+                {showPhysicalMeetingFees && (
+                  <div className="grid grid-cols-2 gap-4 ml-4">
+                    <div>
+                      <label className="block text-xs font-medium text-text-secondary mb-1.5">Meeting Fizikal (RM)</label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted text-sm">RM</span>
+                        <input
+                          type="number" value={physicalMeetingFee} onChange={(e) => onPhysicalMeetingFee(e.target.value)}
+                          className="w-full bg-bg-3 border border-border rounded-xl pl-9 pr-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-text-secondary mb-1.5">Meeting Fizikal Kecemasan (RM)</label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted text-sm">RM</span>
+                        <input
+                          type="number" value={physicalMeetingUrgencyFee} onChange={(e) => onPhysicalMeetingUrgencyFee(e.target.value)}
+                          className="w-full bg-bg-3 border border-border rounded-xl pl-9 pr-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -499,8 +697,8 @@ function Step5({ emailTo, lowLabel, medLabel, highLabel, onEmail, onLow, onMed, 
           <label className="block text-sm font-medium text-text-primary mb-3">Label Tier Perkhidmatan</label>
           <div className="space-y-3">
             <TierInput label="Tier RENDAH" color="text-[#34d399]" value={lowLabel} onChange={onLow} hint="Pertanyaan umum, semakan pantas" />
-            <TierInput label="Tier SEDERHANA" color="text-gold" value={medLabel} onChange={onMed} hint="Konsultasi online / telefon" />
-            <TierInput label="Tier TINGGI" color="text-[#fb923c]" value={highLabel} onChange={onHigh} hint="Temujanji fizikal diperlukan" />
+            <TierInput label="Tier SEDERHANA" color="text-gold" value={medLabel} onChange={onMed} hint="Pertanyaan khusus, semakan peguam diperlukan" />
+            <TierInput label="Tier TINGGI" color="text-[#fb923c]" value={highLabel} onChange={onHigh} hint="Pertanyaan kompleks, semakan teliti peguam diperlukan" />
           </div>
         </div>
       </div>

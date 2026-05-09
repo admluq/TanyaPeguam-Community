@@ -1,0 +1,208 @@
+'use client';
+
+import { useState, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
+import { Link2, Copy, Check, Loader2 } from 'lucide-react';
+
+const SIGNOFF_TEMPLATE = (question: string, refCode: string, baseUrl: string) => `Salam semua,
+
+Berkenaan soalan: "${question.slice(0, 100)}${question.length > 100 ? '...' : ''}"
+
+Secara ringkasnya, kes seperti ini melibatkan pertimbangan undang-undang yang spesifik bergantung kepada fakta penuh. Saya tidak boleh memberi nasihat muktamad tanpa maklumat lanjut.
+
+Jika anda ingin saya bantu lanjut, sila isi borang ringkasan kes saya melalui pautan ini:
+👉 ${baseUrl}/bridge/${refCode}
+
+Donna (pembantu AI saya) akan bantu kumpul maklumat asas dahulu, dan saya akan hubungi anda secara peribadi selepas itu.
+
+— Dihantar menggunakan TanyaPeguam`;
+
+export function BridgeCreator({ practiceAreas }: { practiceAreas: string[] }) {
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [created, setCreated] = useState<{ refCode: string; url: string } | null>(null);
+  const [copied, setCopied] = useState<'link' | 'signoff' | null>(null);
+
+  const [form, setForm] = useState({
+    source: 'Facebook Group',
+    question: '',
+    practiceArea: practiceAreas[0] ?? '',
+    keyFacts: '',
+  });
+
+  function update(key: keyof typeof form, value: string) {
+    setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function submit() {
+    startTransition(async () => {
+      const res = await fetch('/api/donna/bridge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCreated(data);
+        router.refresh();
+      }
+    });
+  }
+
+  async function copy(text: string, type: 'link' | 'signoff') {
+    await navigator.clipboard.writeText(text);
+    setCopied(type);
+    setTimeout(() => setCopied(null), 2000);
+  }
+
+  const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://tanyapeguam.com';
+
+  if (created) {
+    const bridgeUrl = `${baseUrl}/bridge/${created.refCode}`;
+    const signoff = SIGNOFF_TEMPLATE(form.question, created.refCode, baseUrl);
+
+    return (
+      <>
+        <div className="glass-card rounded-2xl p-6 space-y-5">
+          <div className="flex items-center gap-3 text-[#34d399]">
+            <div className="w-8 h-8 rounded-full bg-[rgba(52,211,153,0.12)] flex items-center justify-center">
+              <Check size={16} />
+            </div>
+            <span className="font-semibold text-sm">Bridge berjaya dicipta!</span>
+          </div>
+
+          <div>
+            <p className="text-xs font-medium text-text-secondary mb-2">Pautan Bridge</p>
+            <div className="flex items-center gap-2 bg-bg-3 border border-border rounded-xl px-4 py-3">
+              <Link2 size={14} className="text-text-muted flex-shrink-0" />
+              <span className="text-sm text-text-primary flex-1 truncate font-mono">{bridgeUrl}</span>
+              <button
+                onClick={() => copy(bridgeUrl, 'link')}
+                className="flex items-center gap-1.5 text-xs text-lia-light hover:text-lia transition-colors flex-shrink-0"
+              >
+                {copied === 'link' ? <Check size={13} /> : <Copy size={13} />}
+                {copied === 'link' ? 'Disalin!' : 'Salin'}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-medium text-text-secondary mb-2">Templat Signoff Facebook</p>
+            <div className="bg-bg-3 border border-border rounded-xl p-4">
+              <pre className="text-xs text-text-secondary leading-relaxed whitespace-pre-wrap font-sans">{signoff}</pre>
+            </div>
+            <button
+              onClick={() => copy(signoff, 'signoff')}
+              className="mt-2 flex items-center gap-1.5 text-xs text-lia-light hover:text-lia transition-colors"
+            >
+              {copied === 'signoff' ? <Check size={13} /> : <Copy size={13} />}
+              {copied === 'signoff' ? 'Disalin!' : 'Salin Templat'}
+            </button>
+          </div>
+
+          <button
+            onClick={() => { setCreated(null); setForm({ source: 'Facebook Group', question: '', practiceArea: practiceAreas[0] ?? '', keyFacts: '' }); }}
+            className="w-full text-center text-sm text-text-secondary hover:text-text-primary transition-colors py-2"
+          >
+            + Jana bridge baharu
+          </button>
+        </div>
+
+        {/* Bridge Feature Explanation */}
+        <div className="mt-6 p-4 bg-lia-dim/20 rounded-xl border border-lia-border">
+          <h4 className="text-sm font-semibold text-lia-light mb-2">Apa itu Bridge?</h4>
+          <p className="text-xs text-text-secondary leading-relaxed">
+            Bridge adalah pautan pintar yang membolehkan anda berkongsi dengan klien Facebook Group secara automatik. 
+            Donna AI akan membantu menyaring soalan yang relevan dan menghantar pautan terus kepada klien yang sesuai.
+          </p>
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center gap-2 text-xs text-text-muted">
+              <div className="w-2 h-2 rounded-full bg-gold flex-shrink-0" />
+              <span>Mudah digunakan</span>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-text-muted">
+              <div className="w-2 h-2 rounded-full bg-[#34d399] flex-shrink-0" />
+              <span>Automatik & pintas</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Bridge Active Status Explanation */}
+        <div className="mt-4 p-4 bg-bg-3 rounded-xl border border-border">
+          <h4 className="text-sm font-semibold text-text-primary mb-2">Status Bridge</h4>
+          <p className="text-xs text-text-secondary leading-relaxed">
+            Bridge anda akan aktif selama 3 hari. Selepas tempoh tersebut, link akan luput secara automatik 
+            untuk keselamatan. Anda boleh edit atau padam bridge bila-bila masa melalui panel kawalan.
+          </p>
+          <div className="mt-3 flex items-center gap-2 text-xs text-text-muted">
+            <div className="w-2 h-2 rounded-full bg-[#fb923c] flex-shrink-0" />
+            <span>Auto-luput selepas 3 hari</span>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-text-muted">
+            <div className="w-2 h-2 rounded-full bg-[#f87171] flex-shrink-0" />
+            <span>Boleh edit & padam</span>
+          </div>
+        </div>
+      </>
+    );
+
+  return (
+    <div className="glass-card rounded-2xl p-6 space-y-4">
+      <div>
+        <label className="block text-xs font-medium text-text-secondary mb-1.5">Konteks Perbualan</label>
+        <select
+          value={form.source}
+          onChange={(e) => update('source', e.target.value)}
+          className="w-full bg-bg-3 border border-border rounded-xl px-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors appearance-none"
+        >
+          <option>Facebook Group</option>
+          <option>WhatsApp Group</option>
+          <option>Telegram</option>
+          <option>Lain-lain</option>
+        </select>
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-text-secondary mb-1.5">Konteks Undang-Undang yang Anda Nak Masukkan</label>
+        <textarea
+          value={form.question}
+          onChange={(e) => update('question', e.target.value)}
+          rows={4}
+          placeholder="Tampal soalan dari FB Group di sini..."
+          className="w-full bg-bg-3 border border-border rounded-xl px-4 py-3 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-lia transition-colors resize-none"
+        />
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-text-secondary mb-1.5">Kawasan Amalan</label>
+        <select
+          value={form.practiceArea}
+          onChange={(e) => update('practiceArea', e.target.value)}
+          className="w-full bg-bg-3 border border-border rounded-xl px-4 py-3 text-sm text-text-primary focus:outline-none focus:border-lia transition-colors appearance-none"
+        >
+          {practiceAreas.map((a) => <option key={a}>{a}</option>)}
+          {practiceAreas.length === 0 && <option>Umum</option>}
+        </select>
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-text-secondary mb-1.5">Fakta Kunci (Pilihan)</label>
+        <textarea
+          value={form.keyFacts}
+          onChange={(e) => update('keyFacts', e.target.value)}
+          rows={2}
+          placeholder="Fakta penting yang perlu Donna tahu lebih awal..."
+          className="w-full bg-bg-3 border border-border rounded-xl px-4 py-3 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-lia transition-colors resize-none"
+        />
+      </div>
+
+      <button
+        onClick={submit}
+        disabled={isPending || !form.question.trim()}
+        className="w-full flex items-center justify-center gap-2 bg-lia hover:bg-lia/90 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold px-6 py-3 rounded-xl text-sm transition-colors"
+      >
+        {isPending ? <><Loader2 size={15} className="animate-spin" /> Mencipta...</> : <><Link2 size={15} /> Jana Bridge Link</>}
+      </button>
+    </div>
+  );
+}
