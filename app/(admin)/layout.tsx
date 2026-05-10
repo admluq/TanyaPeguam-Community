@@ -17,11 +17,11 @@ export default async function AdminLayout({
   return (
     <div className="flex h-screen bg-ink-500">
       {/* Sidebar */}
-      <aside className="w-64 bg-ink-300 border-r border-gold/20 p-6 overflow-y-auto">
+      <aside className="w-64 bg-ink-300 border-r border-purple/20 p-6 overflow-y-auto">
         {/* Logo */}
         <div className="mb-8">
-          <Link href="/profile" className="flex items-center gap-2 text-xl font-bold text-cream hover:text-gold-400 transition">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-gold-600 to-gold-500 flex items-center justify-center">
+          <Link href="/profile" className="flex items-center gap-2 text-xl font-bold text-cream hover:text-purple-400 transition">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-600 to-purple-500 flex items-center justify-center">
               <span className="text-ink-500 font-bold text-sm">TP</span>
             </div>
             TanyaPeguam
@@ -29,7 +29,7 @@ export default async function AdminLayout({
         </div>
 
         {/* User Info */}
-        <div className="mb-8 pb-8 border-b border-gold/20">
+        <div className="mb-8 pb-8 border-b border-purple/20">
           <p className="text-xs text-cream/50 mb-1">Logged in as</p>
           <p className="text-sm font-semibold text-cream truncate">{session.user?.email}</p>
         </div>
@@ -44,7 +44,7 @@ export default async function AdminLayout({
         </nav>
 
         {/* Footer */}
-        <div className="mt-auto pt-8 border-t border-gold/20">
+        <div className="mt-auto pt-8 border-t border-purple/20">
           <div className="text-xs text-cream/50 mb-4">
             <p>Admin Panel v1.0</p>
             <p>Focus: Input Setup</p>
@@ -85,7 +85,7 @@ function NavLink({
   return (
     <Link
       href={href}
-      className="flex items-center gap-3 px-4 py-2 rounded-lg text-cream/70 hover:bg-ink-200/30 hover:text-gold-400 transition"
+      className="flex items-center gap-3 px-4 py-2 rounded-lg text-cream/70 hover:bg-ink-200/30 hover:text-purple-400 transition"
     >
       <span className="text-lg">{icon}</span>
       <span className="text-sm font-medium">{label}</span>

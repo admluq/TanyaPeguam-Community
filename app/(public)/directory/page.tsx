@@ -19,7 +19,7 @@ export default async function DirectoryPage() {
       <div className="max-w-6xl mx-auto">
         {/* Header */}
         <div className="mb-12">
-          <Link href="/" className="text-gold-400 hover:text-gold-300 mb-4 inline-block">
+          <Link href="/" className="text-purple-400 hover:text-purple-300 mb-4 inline-block">
             ← Back to Home
           </Link>
           <h1 className="text-5xl font-bold text-cream mb-3">Registered Lawyers Directory</h1>
@@ -30,17 +30,17 @@ export default async function DirectoryPage() {
 
         {/* Stats */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-          <div className="card-base border border-gold/20 rounded-lg p-6">
-            <div className="text-3xl font-bold text-gold-400">{profiles.length}</div>
+          <div className="card-base border border-purple/20 rounded-lg p-6">
+            <div className="text-3xl font-bold text-purple-400">{profiles.length}</div>
             <p className="text-cream/80 text-sm mt-1">Registered Lawyers</p>
           </div>
-          <div className="card-base border border-gold/20 rounded-lg p-6">
+          <div className="card-base border border-purple/20 rounded-lg p-6">
             <div className="text-3xl font-bold text-green-400">
               {profiles.filter((p) => p.donnaConfig).length}
             </div>
             <p className="text-cream/80 text-sm mt-1">With Donna AI Active</p>
           </div>
-          <div className="card-base border border-gold/20 rounded-lg p-6">
+          <div className="card-base border border-purple/20 rounded-lg p-6">
             <div className="text-3xl font-bold text-purple-400">24/7</div>
             <p className="text-cream/80 text-sm mt-1">Intake Support</p>
           </div>
@@ -60,11 +60,11 @@ export default async function DirectoryPage() {
                 href={`/directory/${profile.slug}`}
                 className="group"
               >
-                <div className="card-base border border-gold/20 hover:border-blue-500 rounded-lg p-6 transition h-full cursor-pointer">
+                <div className="card-base border border-purple/20 hover:border-blue-500 rounded-lg p-6 transition h-full cursor-pointer">
                   {/* Header */}
                   <div className="flex items-start justify-between mb-4">
                     <div>
-                      <h3 className="text-xl font-bold text-cream group-hover:text-gold-400 transition">
+                      <h3 className="text-xl font-bold text-cream group-hover:text-purple-400 transition">
                         {profile.user?.name || 'Unnamed'}
                       </h3>
                       {profile.firmName && (
@@ -87,7 +87,7 @@ export default async function DirectoryPage() {
 
                   {/* Donna Config Info */}
                   {profile.donnaConfig && (
-                    <div className="mb-4 pb-4 border-t border-gold/20 pt-4">
+                    <div className="mb-4 pb-4 border-t border-purple/20 pt-4">
                       <div className="text-xs text-cream/50 mb-2">
                         <span className="inline-block bg-purple-900 text-purple-300 px-2 py-1 rounded mr-2">
                           {profile.donnaConfig.personality}
@@ -108,7 +108,7 @@ export default async function DirectoryPage() {
                   )}
 
                   {/* Footer */}
-                  <div className="flex items-center text-gold-400 text-sm font-semibold group-hover:gap-2 transition gap-1">
+                  <div className="flex items-center text-purple-400 text-sm font-semibold group-hover:gap-2 transition gap-1">
                     View Profile →
                   </div>
                 </div>

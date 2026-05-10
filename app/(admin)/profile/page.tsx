@@ -153,7 +153,7 @@ export default function ProfileSetupPage() {
         {/* Header */}
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
-            <Link href="/" className="text-gold-400 hover:text-gold-300 inline-block">
+            <Link href="/" className="text-purple-400 hover:text-purple-300 inline-block">
               ← Back to Home
             </Link>
             <div className="flex items-center gap-2 text-sm text-cream/50">
@@ -167,7 +167,7 @@ export default function ProfileSetupPage() {
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-8">
           {/* SECTION 1: PEGUAM */}
-          <div className="card-base border border-gold/20 rounded-lg p-6">
+          <div className="card-base border border-purple/20 rounded-lg p-6">
             <h2 className="text-lg font-bold text-cream mb-4 flex items-center gap-2">
               👤 Peguam (Lawyer Details)
             </h2>
@@ -181,7 +181,7 @@ export default function ProfileSetupPage() {
                   value={form.slug}
                   onChange={(e) => setForm({ ...form, slug: e.target.value })}
                   placeholder="e.g. arif-azmi"
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                   required
                 />
               </div>
@@ -194,7 +194,7 @@ export default function ProfileSetupPage() {
                   value={form.username}
                   onChange={(e) => setForm({ ...form, username: e.target.value })}
                   placeholder="e.g. arifazmi"
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
 
@@ -204,7 +204,7 @@ export default function ProfileSetupPage() {
                 <select
                   value={form.status}
                   onChange={(e) => setForm({ ...form, status: e.target.value })}
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 >
                   {STATUS_OPTIONS.map((opt) => (
                     <option key={opt.value} value={opt.value}>
@@ -222,7 +222,7 @@ export default function ProfileSetupPage() {
                   value={form.position}
                   onChange={(e) => setForm({ ...form, position: e.target.value })}
                   placeholder="e.g. Founder / Principal Lawyer"
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
             </div>
@@ -240,7 +240,7 @@ export default function ProfileSetupPage() {
                 }}
                 placeholder="Tell clients about your expertise..."
                 rows={3}
-                className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
               />
               <p className="text-xs text-cream/50 mt-1">
                 {form.bio.split(/\s+/).filter(Boolean).length} / 100 words
@@ -249,7 +249,7 @@ export default function ProfileSetupPage() {
           </div>
 
           {/* SECTION 2: FIRMA */}
-          <div className="card-base border border-gold/20 rounded-lg p-6">
+          <div className="card-base border border-purple/20 rounded-lg p-6">
             <h2 className="text-lg font-bold text-cream mb-4 flex items-center gap-2">
               🏢 Firma (Firm Details)
             </h2>
@@ -262,7 +262,7 @@ export default function ProfileSetupPage() {
                   value={form.firmName}
                   onChange={(e) => setForm({ ...form, firmName: e.target.value })}
                   placeholder="e.g. Arif Azmi & Co"
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
 
@@ -273,7 +273,7 @@ export default function ProfileSetupPage() {
                   value={form.firmPhone}
                   onChange={(e) => setForm({ ...form, firmPhone: e.target.value })}
                   placeholder="+60312345678"
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
 
@@ -284,7 +284,7 @@ export default function ProfileSetupPage() {
                   value={form.firmWebsite}
                   onChange={(e) => setForm({ ...form, firmWebsite: e.target.value })}
                   placeholder="https://example.com"
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
 
@@ -295,7 +295,7 @@ export default function ProfileSetupPage() {
                   value={form.googleMapsUrl}
                   onChange={(e) => setForm({ ...form, googleMapsUrl: e.target.value })}
                   placeholder="https://maps.google.com/..."
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
             </div>
@@ -308,13 +308,13 @@ export default function ProfileSetupPage() {
                 onChange={(e) => setForm({ ...form, firmAddress: e.target.value })}
                 placeholder="Full firm address..."
                 rows={2}
-                className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
               />
             </div>
           </div>
 
           {/* SECTION 3: SOCIAL MEDIA */}
-          <div className="card-base border border-gold/20 rounded-lg p-6">
+          <div className="card-base border border-purple/20 rounded-lg p-6">
             <h2 className="text-lg font-bold text-cream mb-4 flex items-center gap-2">
               📱 Media Sosial Profesional (Professional Socials)
             </h2>
@@ -327,7 +327,7 @@ export default function ProfileSetupPage() {
                   value={form.socialFacebook}
                   onChange={(e) => setForm({ ...form, socialFacebook: e.target.value })}
                   placeholder="https://facebook.com/..."
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
 
@@ -338,7 +338,7 @@ export default function ProfileSetupPage() {
                   value={form.socialInstagram}
                   onChange={(e) => setForm({ ...form, socialInstagram: e.target.value })}
                   placeholder="@handle"
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
 
@@ -349,7 +349,7 @@ export default function ProfileSetupPage() {
                   value={form.socialTiktok}
                   onChange={(e) => setForm({ ...form, socialTiktok: e.target.value })}
                   placeholder="@handle"
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
 
@@ -360,7 +360,7 @@ export default function ProfileSetupPage() {
                   value={form.socialLinkedin}
                   onChange={(e) => setForm({ ...form, socialLinkedin: e.target.value })}
                   placeholder="https://linkedin.com/in/..."
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
 
@@ -371,20 +371,20 @@ export default function ProfileSetupPage() {
                   value={form.socialWhatsapp}
                   onChange={(e) => setForm({ ...form, socialWhatsapp: e.target.value })}
                   placeholder="+60123456789"
-                  className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream"
                 />
               </div>
             </div>
           </div>
 
           {/* Public Toggle */}
-          <div className="card-base border border-gold/20 rounded-lg p-6">
+          <div className="card-base border border-purple/20 rounded-lg p-6">
             <label className="flex items-center gap-3 cursor-pointer mb-4">
               <input
                 type="checkbox"
                 checked={form.isPublic}
                 onChange={(e) => setForm({ ...form, isPublic: e.target.checked })}
-                className="w-5 h-5 bg-ink-300 border border-gold/30 rounded"
+                className="w-5 h-5 bg-ink-300 border border-purple/30 rounded"
               />
               <span className="font-semibold text-cream">Publish Digital Card to Directory</span>
             </label>
@@ -400,7 +400,7 @@ export default function ProfileSetupPage() {
                   href={previewUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-gold-400 hover:text-gold-300 text-sm font-semibold break-all"
+                  className="text-purple-400 hover:text-purple-300 text-sm font-semibold break-all"
                 >
                   {`${typeof window !== 'undefined' ? window.location.origin : ''}${previewUrl}`}
                 </a>
@@ -426,7 +426,7 @@ export default function ProfileSetupPage() {
             <button
               type="submit"
               disabled={loading}
-              className="flex-1 bg-gold-600 hover:bg-gold-700 disabled:opacity-50 text-cream font-semibold py-3 px-6 rounded-lg transition"
+              className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-cream font-semibold py-3 px-6 rounded-lg transition"
             >
               {loading ? 'Saving...' : 'Save Digital Card'}
             </button>

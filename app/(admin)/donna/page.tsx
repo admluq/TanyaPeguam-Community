@@ -150,7 +150,7 @@ export default function DonnaConfigPage() {
         </div>
 
         {/* Form */}
-        <div className="card-base border border-gold/20 rounded-lg p-8">
+        <div className="card-base border border-purple/20 rounded-lg p-8">
           <form onSubmit={handleSubmit} className="space-y-6">
             {/* KB Context */}
             <div>
@@ -162,7 +162,7 @@ export default function DonnaConfigPage() {
                 onChange={(e) => setForm({ ...form, kbContext: e.target.value })}
                 placeholder="Describe your expertise, practice areas, availability, fees, etc. This helps Donna AI understand your capabilities..."
                 rows={4}
-                className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-3 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
+                className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-3 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
               />
               <p className="text-xs text-cream/50 mt-1">
                 This context is used by Donna AI to understand client requests and triage appropriately.
@@ -182,7 +182,7 @@ export default function DonnaConfigPage() {
                     personality: e.target.value as 'PROFESSIONAL' | 'SOFT' | 'STRICT',
                   })
                 }
-                className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-3 text-cream focus:outline-none focus:border-purple-500"
+                className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-3 text-cream focus:outline-none focus:border-purple-500"
               >
                 <option value="PROFESSIONAL">Professional (Formal, detailed)</option>
                 <option value="SOFT">Soft (Friendly, approachable)</option>
@@ -201,7 +201,7 @@ export default function DonnaConfigPage() {
                   value={practiceAreaInput}
                   onChange={(e) => setPracticeAreaInput(e.target.value)}
                   placeholder="e.g. Family Law"
-                  className="flex-1 bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
+                  className="flex-1 bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -244,7 +244,7 @@ export default function DonnaConfigPage() {
                   value={deflectPatternInput}
                   onChange={(e) => setDeflectPatternInput(e.target.value)}
                   placeholder="e.g. criminal, tax"
-                  className="flex-1 bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
+                  className="flex-1 bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -312,7 +312,7 @@ export default function DonnaConfigPage() {
         </div>
 
         {/* Info */}
-        <div className="mt-8 card-base border border-gold/20 rounded-lg p-6">
+        <div className="mt-8 card-base border border-purple/20 rounded-lg p-6">
           <h3 className="text-lg font-semibold text-cream mb-3">Configuration Details</h3>
           <ul className="space-y-2 text-cream/80 text-sm">
             <li>✓ <span className="text-purple-400">Knowledge Base:</span> Helps Donna understand your practice</li>

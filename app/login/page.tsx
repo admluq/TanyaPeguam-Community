@@ -10,14 +10,14 @@ function LoginForm() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-ink-400 via-ink-500 to-ink-600">
-      <div className="w-full max-w-md p-8 card-base rounded-2xl border border-gold/20">
+      <div className="w-full max-w-md p-8 card-base rounded-2xl border border-purple/20">
         <div className="flex items-center gap-2 mb-6">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-gold-600 to-gold-500 flex items-center justify-center">
+          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-600 to-purple-500 flex items-center justify-center">
             <span className="text-ink-500 font-bold text-lg">TP</span>
           </div>
           <h1 className="text-2xl font-bold text-cream">TanyaPeguam</h1>
         </div>
-        <p className="text-gold-400 text-sm font-semibold mb-8">Donna AI — Lawyer Intake Portal</p>
+        <p className="text-purple-400 text-sm font-semibold mb-8">Donna AI — Lawyer Intake Portal</p>
 
         <button
           onClick={() => signIn('google', { callbackUrl })}

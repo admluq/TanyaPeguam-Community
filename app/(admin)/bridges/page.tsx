@@ -42,7 +42,7 @@ const URGENCY_COLOR: Record<string, string> = {
 const TIER_CONFIG: Record<string, { label: string; color: string }> = {
   LOW: { label: 'Konsultasi Percuma', color: 'text-green-400' },
   MED: { label: 'Konsultasi Berbayar', color: 'text-indigo-400' },
-  HIGH: { label: 'Penahanan Penuh', color: 'text-gold-400' },
+  HIGH: { label: 'Penahanan Penuh', color: 'text-purple-400' },
 };
 
 const FILTER_TABS: { key: string; label: string }[] = [
@@ -100,7 +100,7 @@ export default function BridgesPage() {
 
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-3xl font-display font-bold text-gold-gradient mb-1">
+          <h1 className="text-3xl font-display font-bold text-purple-gradient mb-1">
             Peti Masuk Pertanyaan
           </h1>
           <p className="text-sm text-cream/50">
@@ -131,8 +131,8 @@ export default function BridgesPage() {
               onClick={() => setFilter(tab.key)}
               className={`px-4 py-1.5 rounded-full text-xs font-semibold transition border ${
                 filter === tab.key
-                  ? 'bg-gold-500 text-ink-500 border-gold-500'
-                  : 'bg-ink-300/20 text-cream/60 border-gold/10 hover:border-gold/30 hover:text-cream'
+                  ? 'bg-purple-500 text-ink-500 border-purple-500'
+                  : 'bg-ink-300/20 text-cream/60 border-purple/10 hover:border-purple/30 hover:text-cream'
               }`}
             >
               {tab.label}
@@ -198,7 +198,7 @@ export default function BridgesPage() {
                         <p className="text-xs text-cream/40">{formatDate(inquiry.createdAt)}</p>
                         <div className="flex items-center justify-end gap-1 mt-1">
                           <span className="text-xs text-cream/40">Skor:</span>
-                          <span className="text-xs font-bold text-gold-400">{inquiry.concreteScore}</span>
+                          <span className="text-xs font-bold text-purple-400">{inquiry.concreteScore}</span>
                         </div>
                       </div>
 

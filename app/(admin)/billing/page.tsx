@@ -21,7 +21,7 @@ export default function BillingPage() {
         </div>
 
         {/* Form */}
-        <div className="card-base border border-gold/20 rounded-lg p-8">
+        <div className="card-base border border-purple/20 rounded-lg p-8">
           <div className="text-center py-16">
             <div className="text-5xl mb-4">💳</div>
             <h2 className="text-2xl font-bold text-cream mb-2">Freemium Model (v2)</h2>
@@ -29,7 +29,7 @@ export default function BillingPage() {
               Billing and subscription management is planned for v2.
             </p>
             <p className="text-sm text-gray-500 mb-6">
-              Current plan: <span className="text-gold-400 font-semibold">Free (Unlimited v1)</span>
+              Current plan: <span className="text-purple-400 font-semibold">Free (Unlimited v1)</span>
             </p>
 
             <div className="bg-ink-300 rounded-lg p-4 text-left inline-block mb-8">
@@ -54,7 +54,7 @@ export default function BillingPage() {
             <Link href="/profile" className="flex-1">
               <button
                 type="button"
-                className="w-full bg-gold-600 hover:bg-gold-700 text-cream font-semibold py-3 px-6 rounded-lg transition"
+                className="w-full bg-purple-600 hover:bg-purple-700 text-cream font-semibold py-3 px-6 rounded-lg transition"
               >
                 View Digital Card →
               </button>
