@@ -1,9 +1,6 @@
 // =====================================================
-// tptree — Prisma Schema
-// =====================================================
-// Multi-tenant lawyer profile pages
-// Each Profile has many Links (social, contact, web)
-// Each Link can have CachedPreview for live data
+// TanyaPeguam Donna AI — Prisma Schema
+// Admin-Backwards Architecture
 // =====================================================
 
 generator client {
@@ -21,22 +18,16 @@ datasource db {
 
 model User {
   id            String    @id @default(cuid())
-  name          String?
   email         String    @unique
   emailVerified DateTime?
+  name          String?
   image         String?
-  passwordHash  String?
-  role          UserRole  @default(CLIENT)
 
   accounts      Account[]
   sessions      Session[]
 
-  profile       Profile?       @relation(fields: [profileId], references: [id])
-  profileId     String?        @unique
-
-  donnaConfig   DonnaConfig?
-  donnaBridges  DonnaBridge[]
-  donnaInquiries DonnaInquiry[]
+  // Link to lawyer profile
+  lawyerProfile LawyerProfile?
 
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -82,261 +73,104 @@ model VerificationToken {
   @@id([identifier, token])
 }
 
-enum UserRole {
-  SUPER_ADMIN
-  CLIENT
-}
-
 // ─────────────────────────────────────────────────────
-// DonnaConfig — lawyer's Donna configuration
-// Populated via 5-step setup wizard
+// LawyerProfile — The core identity for each lawyer
+// Every user with a lawyer role has exactly one profile
 // ─────────────────────────────────────────────────────
-model DonnaConfig {
-  id     String @id @default(cuid())
-  userId String @unique
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  practiceAreas String[]
-  jurisdiction String?
-  barCouncil   String?
-  workingHours     Json?
-  firstConsultMode String?
-  consultFee       Float?
-  urgencyFee       Float?
-  sensitivityLevel Int      @default(5)
-  deflectPatterns  String[]
-  emailTo       String?
-  lowTierLabel  String @default("Konsultasi (RM50)")
-  medTierLabel  String @default("Web Call")
-  highTierLabel String @default("Temujanji")
-
-  isComplete Boolean  @default(false)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-}
-
-// ─────────────────────────────────────────────────────
-// DonnaBridge — context links for FB Group handoffs
-// ─────────────────────────────────────────────────────
-model DonnaBridge {
-  id     String @id @default(cuid())
-  userId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  refCode      String  @unique
-  source       String?
-  question     String  @db.Text
-  practiceArea String?
-  keyFacts     String? @db.Text
-
-  clickCount  Int       @default(0)
-  lastClickAt DateTime?
-
-  expiresAt DateTime?
-  isActive  Boolean   @default(true)
-
-  inquiries DonnaInquiry[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([refCode])
-  @@index([userId])
-}
-
-// ─────────────────────────────────────────────────────
-// DonnaInquiry — individual intake record
-// ─────────────────────────────────────────────────────
-model DonnaInquiry {
-  id     String @id @default(cuid())
-  userId String
-  user   User   @relation(fields: [userId], references: [id])
-
-  bridgeId String?
-  bridge   DonnaBridge? @relation(fields: [bridgeId], references: [id])
-
-  callerName  String?
-  callerPhone String?
-  callerEmail String?
-
-  issueSummary String  @db.Text
-  practiceArea String?
-
-  concreteScore  Int    @default(5)
-  urgencyTag     String @default("STANDARD")
-  conversionTier String @default("MED")
-
-  status InquiryStatus @default(CAPTURED)
-
-  emailSentAt DateTime?
-
-  acceptToken String? @unique
-  rejectToken String? @unique
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([userId, createdAt])
-  @@index([status])
-}
-
-enum InquiryStatus {
-  DEFLECTED
-  CAPTURED
-  EMAILED
-  ACCEPTED
-  REJECTED
-  EXPIRED
-}
-
-// ─────────────────────────────────────────────────────
-// Profile — the lawyer's profile page
-// URL: tanyapeguam.com/[slug]
-// ─────────────────────────────────────────────────────
-model Profile {
+model LawyerProfile {
   id        String   @id @default(cuid())
-  slug      String   @unique // URL slug, e.g. "datukwanazmir"
-  isActive  Boolean  @default(true)
-  isVerified Boolean @default(false) // shows "Profil Disahkan" badge
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // Identity
-  name      String   // "Datuk Wan Azmir"
-  title     String   // "Peguam Kanan"
-  firm      String?  // "HWAM" — short name for header
-  firmFull  String?  // "Hafarizam Wan & Aisha Mubarak" — full name
-  monogram  String?  // "WA" — for avatar circle
-
-  // Location & status
-  location  String   // "Kuala Lumpur"
-  status    Status   @default(AVAILABLE)
-
-  // Practice areas (badges)
-  practiceAreas String[] // ["Korporat & Sivil", "Litigasi"]
-
-  // Bio (optional, for SEO meta description)
+  // Profile identity
+  slug      String   @unique // URL-safe identifier
+  firmName  String?  // e.g. "Arif Azmi & Co"
   bio       String?  @db.Text
 
-  // SEO
-  metaTitle       String?
-  metaDescription String?
+  // Social & contact links (JSON structure)
+  // { whatsapp: "+60123456789", linkedin: "url", website: "url", ... }
+  socialLinks Json?
+
+  // Public visibility
+  isPublic  Boolean  @default(false)
 
   // Relations
-  links     Link[]
+  donnaConfig  DonnaConfig?
+  donnaBridges DonnaBridge[]
 
-  // Timestamps
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([userId])
   @@index([slug])
-  @@index([isActive])
-}
-
-enum Status {
-  AVAILABLE
-  BUSY
-  AWAY
-  OFFLINE
 }
 
 // ─────────────────────────────────────────────────────
-// Link — individual link card on profile
-// E.g. WhatsApp, LinkedIn, TikTok, Website
+// DonnaConfig — AI orchestration rules for the lawyer
+// Linked to LawyerProfile, controls multi-agent behavior
 // ─────────────────────────────────────────────────────
-model Link {
-  id           String   @id @default(cuid())
-  profileId    String
-  profile      Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
-  type         LinkType // determines icon, color, expand behavior
-  label        String   // "Hubungi Kami", "LinkedIn"
-  subtitle     String?  // "WhatsApp · Lokasi · Ulasan"
-  url          String?  // optional — some links don't go anywhere (e.g. AI chat)
-  displayOrder Int      @default(0)
-  isActive     Boolean  @default(true)
-
-  // Custom data per link type (JSON)
-  // - WHATSAPP: { phone, prefilledMessage }
-  // - WEBSITE: { domain, screenshotUrl }
-  // - LINKEDIN: { handle, manualPosts: [...] }
-  // - TIKTOK: { handle, videoIds: [...] }
-  // - FACEBOOK: { pageId, stats: { likes, followers, rating } }
-  // - INSTAGRAM: { handle }
-  // - TWITTER: { handle }
-  // - AI_CHAT: { agentId, modelName }
-  metadata     Json?
-
-  // Cached fetched data (refreshed via cron)
-  cachedPreview CachedPreview?
-
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  @@index([profileId])
-  @@index([type])
+enum DonnaPersonality {
+  PROFESSIONAL
+  SOFT
+  STRICT
 }
 
-enum LinkType {
-  WHATSAPP
-  WEBSITE
-  LINKEDIN
-  INSTAGRAM
-  FACEBOOK
-  TIKTOK
-  TWITTER
-  YOUTUBE
-  EMAIL
-  PHONE
-  AI_CHAT
-  CUSTOM
-}
+model DonnaConfig {
+  id               String   @id @default(cuid())
+  profileId        String   @unique
+  profile          LawyerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
-// ─────────────────────────────────────────────────────
-// CachedPreview — server-side cache for live previews
-// Refreshed via cron job (e.g. every 24h)
-// ─────────────────────────────────────────────────────
-model CachedPreview {
-  id          String   @id @default(cuid())
-  linkId      String   @unique
-  link        Link     @relation(fields: [linkId], references: [id], onDelete: Cascade)
+  // Knowledge & behavior
+  kbContext        String?  @db.Text // Knowledge base context for the AI
+  personality      DonnaPersonality @default(PROFESSIONAL)
 
-  // Preview data (varies by link type)
-  // - WEBSITE: { ogTitle, ogDescription, ogImage, screenshotUrl }
-  // - LINKEDIN: { posts: [{ content, postedAt, url }] }
-  // - TIKTOK: { videos: [{ id, thumbnail, caption, views }] }
-  // - FACEBOOK: { likes, followers, rating, latestPost }
-  data        Json
-
-  // Cache control
-  fetchedAt   DateTime @default(now())
-  expiresAt   DateTime
-  fetchStatus FetchStatus @default(SUCCESS)
-  errorMessage String?
-
-  @@index([expiresAt])
-}
-
-enum FetchStatus {
-  SUCCESS
-  FAILED
-  STALE
-}
-
-// ─────────────────────────────────────────────────────
-// AnalyticsEvent — track clicks per link (Phase 5)
-// ─────────────────────────────────────────────────────
-model AnalyticsEvent {
-  id        String   @id @default(cuid())
-  profileId String
-  linkId    String?
-  eventType String   // "page_view", "link_click", "expand"
-
-  // Visitor metadata (anonymized)
-  country   String?
-  device    String?
-  referrer  String?
+  // Triage rules (JSON structure)
+  // { deflectPatterns: [...], practiceAreas: [...], urgencyFlags: [...] }
+  triageRules      Json?
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  @@index([profileId, createdAt])
-  @@index([linkId, createdAt])
+  @@index([profileId])
+}
+
+// ─────────────────────────────────────────────────────
+// DonnaBridge — Session logger for intakes
+// Each bridge represents one conversation/intake session
+// ─────────────────────────────────────────────────────
+
+enum BridgeStatus {
+  ACTIVE
+  COMPLETED
+  ABANDONED
+  ESCALATED
+}
+
+model DonnaBridge {
+  id               String   @id @default(cuid())
+  profileId        String
+  profile          LawyerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  // Session tracking
+  shortCode        String   @unique // Short identifier for sharing
+  status           BridgeStatus @default(ACTIVE)
+
+  // Conversation data
+  transcript       String?  @db.Text // Full conversation log
+  triageResult     Json?    // Result of intake triage
+
+  // Metadata
+  clientName       String?
+  clientEmail      String?
+  clientPhone      String?
+  practiceArea     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([profileId])
+  @@index([shortCode])
+  @@index([status])
 }

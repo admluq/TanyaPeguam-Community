@@ -1,104 +1,134 @@
+import { auth } from '@/auth';
+import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { db } from '@/lib/db';
 
-export default async function HomePage() {
-  // Fetch active profiles for showcase
-  const profiles = await db.profile.findMany({
-    where: { isActive: true },
-    orderBy: { createdAt: 'desc' },
-    take: 12,
-    select: {
-      slug: true,
-      name: true,
-      title: true,
-      firm: true,
-      monogram: true,
-      location: true,
-      practiceAreas: true,
-    },
-  });
+export default async function Home() {
+  const session = await auth();
+
+  // Redirect authenticated users to admin
+  if (session?.user) {
+    redirect('/admin');
+  }
 
   return (
-    <main className="relative min-h-screen overflow-hidden">
-      {/* Decorative gold radial */}
-      <div className="absolute inset-0 bg-gold-radial opacity-30 pointer-events-none" />
-
-      <div className="relative max-w-4xl mx-auto px-6 py-24">
-        {/* Header */}
-        <header className="text-center mb-20 animate-fade-in">
-          <p className="text-gold tracking-[0.3em] text-xs uppercase mb-4">
-            TanyaPeguam.com
-          </p>
-          <h1 className="font-display text-6xl md:text-7xl text-cream leading-tight mb-6">
-            Direktori Peguam<br />
-            <span className="text-gold-gradient italic">Malaysia</span>
-          </h1>
-          <p className="text-cream-muted max-w-xl mx-auto text-lg leading-relaxed">
-            Cari peguam terpilih, hubungi terus melalui WhatsApp atau pelbagai
-            saluran komunikasi. Profesional. Disahkan. Mudah.
-          </p>
-        </header>
-
-        {/* Profile grid */}
-        <section>
-          <h2 className="font-display text-2xl text-cream mb-6 flex items-center gap-3">
-            <span className="h-px flex-1 bg-gradient-to-r from-transparent to-gold/40" />
-            Peguam Terpilih
-            <span className="h-px flex-1 bg-gradient-to-l from-transparent to-gold/40" />
-          </h2>
-
-          {profiles.length === 0 ? (
-            <p className="text-center text-cream-muted py-12">
-              Belum ada profil peguam. Jalankan{' '}
-              <code className="text-gold">npm run db:seed</code> untuk seed data.
-            </p>
-          ) : (
-            <div className="grid sm:grid-cols-2 gap-4">
-              {profiles.map((p) => (
-                <Link
-                  key={p.slug}
-                  href={`/${p.slug}`}
-                  className="card-base group p-5 flex items-center gap-4 animate-slide-up"
-                >
-                  {/* Monogram circle */}
-                  <div className="relative shrink-0">
-                    <div className="w-14 h-14 rounded-full border border-gold/40 flex items-center justify-center bg-ink-300 group-hover:border-gold transition-colors">
-                      <span className="font-display text-gold text-lg">
-                        {p.monogram ?? p.name.slice(0, 2).toUpperCase()}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Info */}
-                  <div className="min-w-0 flex-1">
-                    <p className="font-display text-cream text-lg leading-tight truncate">
-                      {p.name}
-                    </p>
-                    <p className="text-gold/80 text-xs uppercase tracking-wider mt-0.5">
-                      {p.title} {p.firm && `· ${p.firm}`}
-                    </p>
-                    <p className="text-cream-muted text-xs mt-1.5 truncate">
-                      {p.location}
-                    </p>
-                  </div>
-
-                  {/* Arrow */}
-                  <span className="text-gold/40 group-hover:text-gold transition-colors text-xl">
-                    →
-                  </span>
-                </Link>
-              ))}
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800">
+      {/* Hero Section */}
+      <div className="min-h-screen flex flex-col items-center justify-center px-6">
+        <div className="max-w-2xl text-center">
+          {/* Logo */}
+          <div className="inline-flex items-center gap-3 mb-8">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center">
+              <span className="text-white font-bold text-2xl">TP</span>
             </div>
-          )}
-        </section>
+            <span className="text-2xl font-bold text-white">TanyaPeguam</span>
+          </div>
 
-        {/* Footer */}
-        <footer className="mt-24 pt-8 border-t border-ink-50 text-center">
-          <p className="text-cream-muted text-xs">
-            <span className="text-gold">TanyaPeguam.com</span> · D7 Holdings Sdn Bhd
+          {/* Heading */}
+          <h1 className="text-5xl md:text-6xl font-bold text-white mb-6 leading-tight">
+            Donna AI <br />
+            <span className="bg-gradient-to-r from-purple-400 to-blue-400 bg-clip-text text-transparent">
+              Lawyer Intake Portal
+            </span>
+          </h1>
+
+          {/* Description */}
+          <p className="text-xl text-gray-300 mb-8 leading-relaxed">
+            Automate client intake, intelligent triage, and seamless multi-agent orchestration.
+            <br />
+            Built for Malaysian lawyers.
           </p>
-        </footer>
+
+          {/* Features */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-6">
+              <div className="text-2xl mb-2">🤖</div>
+              <h3 className="font-semibold text-white mb-2">AI Orchestration</h3>
+              <p className="text-sm text-gray-400">Multi-agent triage & intake</p>
+            </div>
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-6">
+              <div className="text-2xl mb-2">⚡</div>
+              <h3 className="font-semibold text-white mb-2">Real-Time Routing</h3>
+              <p className="text-sm text-gray-400">Smart client qualification</p>
+            </div>
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-6">
+              <div className="text-2xl mb-2">📊</div>
+              <h3 className="font-semibold text-white mb-2">Analytics</h3>
+              <p className="text-sm text-gray-400">Track intake metrics</p>
+            </div>
+          </div>
+
+          {/* CTA Buttons */}
+          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+            <Link href="/login">
+              <button className="w-full sm:w-auto px-8 py-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition shadow-lg">
+                Sign In with Google
+              </button>
+            </Link>
+            <a
+              href="#features"
+              className="w-full sm:w-auto px-8 py-4 border border-gray-500 hover:border-gray-300 text-white font-semibold rounded-lg transition"
+            >
+              Learn More
+            </a>
+          </div>
+
+          {/* Support Text */}
+          <p className="text-gray-400 text-sm mt-8">
+            For registered TanyaPeguam lawyers only
+          </p>
+        </div>
       </div>
-    </main>
+
+      {/* Features Section */}
+      <div id="features" className="bg-slate-800 py-20 px-6">
+        <div className="max-w-4xl mx-auto">
+          <h2 className="text-3xl font-bold text-white mb-12 text-center">How It Works</h2>
+          <div className="space-y-8">
+            <div className="flex gap-6">
+              <div className="text-4xl font-bold text-blue-400 w-12 h-12 rounded-lg bg-blue-900 flex items-center justify-center flex-shrink-0">
+                1
+              </div>
+              <div>
+                <h3 className="text-xl font-semibold text-white mb-2">Create Your Profile</h3>
+                <p className="text-gray-300">
+                  Set up your lawyer profile, firm details, and practice areas. Your profile becomes your unique identifier in the system.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-6">
+              <div className="text-4xl font-bold text-purple-400 w-12 h-12 rounded-lg bg-purple-900 flex items-center justify-center flex-shrink-0">
+                2
+              </div>
+              <div>
+                <h3 className="text-xl font-semibold text-white mb-2">Configure Donna AI</h3>
+                <p className="text-gray-300">
+                  Set up Donna's personality, knowledge base, and triage rules. Control how the AI qualifies and routes client intakes.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-6">
+              <div className="text-4xl font-bold text-green-400 w-12 h-12 rounded-lg bg-green-900 flex items-center justify-center flex-shrink-0">
+                3
+              </div>
+              <div>
+                <h3 className="text-xl font-semibold text-white mb-2">Deploy & Monitor</h3>
+                <p className="text-gray-300">
+                  Deploy the intake widget to your Facebook Group or website. Monitor all inquiries, triage results, and client conversations in real-time.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div className="bg-slate-900 border-t border-slate-700 py-8 px-6">
+        <div className="max-w-4xl mx-auto text-center text-gray-400 text-sm">
+          <p>© 2026 TanyaPeguam. Donna AI Platform. Built for Malaysian lawyers.</p>
+        </div>
+      </div>
+    </div>
   );
 }
