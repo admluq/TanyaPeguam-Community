@@ -17,7 +17,7 @@ export default async function Home() {
         <div className="max-w-2xl text-center">
           {/* Logo */}
           <div className="inline-flex items-center gap-3 mb-8">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-600 to-purple-500 flex items-center justify-center">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-gold-600 to-gold-500 flex items-center justify-center">
               <span className="text-ink-500 font-bold text-2xl">TP</span>
             </div>
             <span className="text-2xl font-bold text-cream">TanyaPeguam</span>
@@ -26,7 +26,7 @@ export default async function Home() {
           {/* Heading */}
           <h1 className="text-5xl md:text-6xl font-display font-bold text-cream mb-6 leading-tight">
             Donna AI <br />
-            <span className="text-purple-gradient">
+            <span className="text-gold-gradient">
               Lawyer Intake Portal
             </span>
           </h1>
@@ -40,17 +40,17 @@ export default async function Home() {
 
           {/* Features */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-            <div className="card-base rounded-lg p-6 border border-purple/20">
+            <div className="card-base rounded-lg p-6 border border-gold/20">
               <div className="text-2xl mb-2">🤖</div>
               <h3 className="font-semibold text-cream mb-2">AI Orchestration</h3>
               <p className="text-sm text-cream/60">Multi-agent triage & intake</p>
             </div>
-            <div className="card-base rounded-lg p-6 border border-purple/20">
+            <div className="card-base rounded-lg p-6 border border-gold/20">
               <div className="text-2xl mb-2">⚡</div>
               <h3 className="font-semibold text-cream mb-2">Real-Time Routing</h3>
               <p className="text-sm text-cream/60">Smart client qualification</p>
             </div>
-            <div className="card-base rounded-lg p-6 border border-purple/20">
+            <div className="card-base rounded-lg p-6 border border-gold/20">
               <div className="text-2xl mb-2">📊</div>
               <h3 className="font-semibold text-cream mb-2">Analytics</h3>
               <p className="text-sm text-cream/60">Track intake metrics</p>
@@ -60,12 +60,12 @@ export default async function Home() {
           {/* CTA Buttons */}
           <div className="flex flex-col sm:flex-row gap-4 justify-center mb-8">
             <Link href="/login">
-              <button className="w-full sm:w-auto px-8 py-4 bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-500 hover:to-purple-400 text-ink-500 font-semibold rounded-lg transition shadow-lg">
+              <button className="w-full sm:w-auto px-8 py-4 bg-gradient-to-r from-gold-600 to-gold-500 hover:from-gold-500 hover:to-gold-400 text-ink-500 font-semibold rounded-lg transition shadow-lg">
                 Sign In with Google
               </button>
             </Link>
             <Link href="/directory">
-              <button className="w-full sm:w-auto px-8 py-4 border border-purple/40 hover:border-purple/60 text-cream font-semibold rounded-lg transition">
+              <button className="w-full sm:w-auto px-8 py-4 border border-gold/40 hover:border-gold/60 text-cream font-semibold rounded-lg transition">
                 Browse Lawyers
               </button>
             </Link>
@@ -79,12 +79,12 @@ export default async function Home() {
       </div>
 
       {/* Features Section */}
-      <div id="features" className="bg-ink-300 py-20 px-6 border-t border-purple/20">
+      <div id="features" className="bg-ink-300 py-20 px-6 border-t border-gold/20">
         <div className="max-w-4xl mx-auto">
           <h2 className="text-3xl font-bold text-cream mb-12 text-center">How It Works</h2>
           <div className="space-y-8">
             <div className="flex gap-6">
-              <div className="text-4xl font-bold text-purple-400 w-12 h-12 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+              <div className="text-4xl font-bold text-gold-400 w-12 h-12 rounded-lg bg-gold-500/20 flex items-center justify-center flex-shrink-0">
                 1
               </div>
               <div>
@@ -96,7 +96,7 @@ export default async function Home() {
             </div>
 
             <div className="flex gap-6">
-              <div className="text-4xl font-bold text-purple-400 w-12 h-12 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+              <div className="text-4xl font-bold text-gold-400 w-12 h-12 rounded-lg bg-gold-500/20 flex items-center justify-center flex-shrink-0">
                 2
               </div>
               <div>
@@ -108,7 +108,7 @@ export default async function Home() {
             </div>
 
             <div className="flex gap-6">
-              <div className="text-4xl font-bold text-purple-400 w-12 h-12 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+              <div className="text-4xl font-bold text-gold-400 w-12 h-12 rounded-lg bg-gold-500/20 flex items-center justify-center flex-shrink-0">
                 3
               </div>
               <div>
@@ -123,7 +123,7 @@ export default async function Home() {
       </div>
 
       {/* Footer */}
-      <div className="bg-ink-500 border-t border-purple/20 py-8 px-6">
+      <div className="bg-ink-500 border-t border-gold/20 py-8 px-6">
         <div className="max-w-4xl mx-auto text-center text-cream/40 text-sm">
           <p>© 2026 TanyaPeguam. Donna AI Platform. Built for Malaysian lawyers.</p>
         </div>
