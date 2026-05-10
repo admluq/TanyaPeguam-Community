@@ -53,6 +53,158 @@ const FILTER_TABS: { key: string; label: string }[] = [
   { key: 'DEFLECTED', label: 'Dilentur' },
 ];
 
+// Bridge Creator Component
+function BridgeCreator() {
+  const [question, setQuestion] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<{ bridgeId: string; shortCode: string } | null>(null);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  async function handleCreateBridge() {
+    setError('');
+    setLoading(true);
+
+    try {
+      const res = await fetch('/api/bridge/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, answer }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error || 'Gagal mencipta pautan');
+        setLoading(false);
+        return;
+      }
+
+      const data = await res.json();
+      setResult(data);
+      setQuestion(''); // Clear form
+      setAnswer('');
+      setCopied(false);
+    } catch (err) {
+      console.error('Bridge creation error:', err);
+      setError('Ralat rangkaian. Sila cuba lagi.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function copyToClipboard() {
+    if (result) {
+      try {
+        await navigator.clipboard.writeText(result.shortCode);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch (err) {
+        console.error('Copy failed:', err);
+      }
+    }
+  }
+
+  return (
+    <div className="bg-black border-2 border-yellow-500 rounded-xl p-6 mb-6">
+      <h3 className="text-sm font-semibold text-cream mb-3 uppercase tracking-wider">
+        Jana Pautan Jambatan
+      </h3>
+
+      {!result ? (
+        <div className="space-y-3">
+          {/* Question Input */}
+          <div>
+            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">
+              Soalan Pelanggan
+            </label>
+            <textarea
+              value={question}
+              onChange={(e) => {
+                setQuestion(e.target.value);
+                setError('');
+              }}
+              placeholder="Masukkan soalan atau pertanyaan dari Facebook/calon klien..."
+              className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500/30 resize-none"
+              rows={2}
+            />
+          </div>
+
+          {/* Answer Input */}
+          <div>
+            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">
+              Nasihat Awal Peguam
+            </label>
+            <textarea
+              value={answer}
+              onChange={(e) => {
+                setAnswer(e.target.value);
+                setError('');
+              }}
+              placeholder="Sertakan nasihat awal atau respons anda kepada soalan ini untuk membantu calon klien menilai kesesuaian..."
+              className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500/30 resize-none"
+              rows={3}
+            />
+          </div>
+
+          {error && (
+            <div className="text-red-400 text-xs bg-red-900/20 rounded p-2 border border-red-900/30">
+              {error}
+            </div>
+          )}
+
+          <button
+            onClick={handleCreateBridge}
+            disabled={!question.trim() || !answer.trim() || loading}
+            className={`w-full py-2 px-4 rounded-lg font-semibold text-sm transition ${
+              !question.trim() || !answer.trim() || loading
+                ? 'bg-purple-500/30 text-cream/40 cursor-not-allowed'
+                : 'bg-purple-500 text-ink-500 hover:bg-purple-600 active:scale-95'
+            }`}
+          >
+            {loading ? 'Mencipta...' : 'Jana Pautan'}
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="bg-ink-400/40 border border-green-500/30 rounded-lg p-4">
+            <p className="text-xs text-cream/60 uppercase tracking-wider mb-2">Kod Pautan Jambatan</p>
+            <div className="flex items-center gap-2">
+              <code className="text-lg font-mono font-bold text-green-400 flex-1">
+                {result.shortCode}
+              </code>
+              <button
+                onClick={copyToClipboard}
+                className={`px-3 py-1.5 rounded text-xs font-semibold transition ${
+                  copied
+                    ? 'bg-green-500 text-ink-500'
+                    : 'bg-purple-500 text-ink-500 hover:bg-purple-600'
+                }`}
+              >
+                {copied ? '✓ Disalin' : 'Salin'}
+              </button>
+            </div>
+            <p className="text-xs text-cream/50 mt-2">
+              Berkongsi kod ini dengan calon klien. Mereka akan melihat soalan, nasihat anda, dan borang pendaftaran semasa mengakses widget Donna.
+            </p>
+          </div>
+
+          <button
+            onClick={() => {
+              setResult(null);
+              setQuestion('');
+              setAnswer('');
+            }}
+            className="w-full py-2 px-4 rounded-lg font-semibold text-sm bg-ink-300/20 text-cream/60 hover:bg-ink-300/30 transition"
+          >
+            Jana Pautan Lain
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function BridgesPage() {
   const [inquiries, setInquiries]     = useState<Inquiry[]>([]);
   const [loading, setLoading]         = useState(true);
@@ -100,12 +252,21 @@ export default function BridgesPage() {
 
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-3xl font-display font-bold text-purple-gradient mb-1">
-            Peti Masuk Pertanyaan
-          </h1>
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-3xl font-display font-bold text-purple-gradient mb-1">
+              Peti Masuk Pertanyaan
+            </h1>
+            <Link href="/donna" className="text-purple-400 hover:text-purple-300">
+              ← Back: Step 3
+            </Link>
+          </div>
           <p className="text-sm text-cream/50">
             Semua pertanyaan yang diproses oleh Donna AI
           </p>
+          <div className="flex items-center justify-between mt-4 py-4 px-4 bg-purple-500/10 border border-purple-500/20 rounded-lg">
+            <span className="text-sm font-semibold text-cream">Step 4 of 5: Bridge Manager</span>
+            <span className="text-xs text-cream/60">Manage intake inquiries and create bridge links</span>
+          </div>
         </div>
 
         {/* Stats Strip */}
@@ -122,6 +283,9 @@ export default function BridgesPage() {
             </div>
           ))}
         </div>
+
+        {/* Bridge Creator */}
+        <BridgeCreator />
 
         {/* Filter Tabs */}
         <div className="flex gap-2 mb-6 flex-wrap">

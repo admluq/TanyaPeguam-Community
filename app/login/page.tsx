@@ -3,25 +3,27 @@
 import { Suspense } from 'react';
 import { signIn } from 'next-auth/react';
 import { useSearchParams } from 'next/navigation';
+import Link from 'next/link';
+import { LogoWithText } from '@/components/logo';
 
 function LoginForm() {
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get('callbackUrl') ?? '/admin';
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-ink-400 via-ink-500 to-ink-600">
+    <div className="min-h-screen flex items-center justify-center bg-black">
+      <div className="absolute top-8 left-8">
+        <Link href="/" className="text-cream/60 hover:text-cream transition text-sm font-medium">
+          ← Back to Home
+        </Link>
+      </div>
       <div className="w-full max-w-md p-8 card-base rounded-2xl border border-purple/20">
-        <div className="flex items-center gap-2 mb-6">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-600 to-purple-500 flex items-center justify-center">
-            <span className="text-ink-500 font-bold text-lg">TP</span>
-          </div>
-          <h1 className="text-2xl font-bold text-cream">TanyaPeguam</h1>
-        </div>
+        <LogoWithText size="md" className="mb-6" />
         <p className="text-purple-400 text-sm font-semibold mb-8">Donna AI — Lawyer Intake Portal</p>
 
         <button
           onClick={() => signIn('google', { callbackUrl })}
-          className="w-full flex items-center justify-center gap-3 bg-cream text-ink-500 font-semibold py-3 px-4 rounded-lg hover:bg-cream/90 transition"
+          className="w-full flex items-center justify-center gap-3 bg-slate-700 text-slate-100 font-semibold py-3 px-4 rounded-lg hover:bg-slate-600 transition"
         >
           <GoogleIcon />
           Sign in with Google
@@ -37,7 +39,7 @@ function LoginForm() {
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-ink-400 via-ink-500 to-ink-600" />}>
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-black" />}>
       <LoginForm />
     </Suspense>
   );

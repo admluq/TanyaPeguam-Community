@@ -114,10 +114,14 @@ model LawyerProfile {
   // Public visibility
   isPublic  Boolean  @default(false)
 
+  // Setup tracking
+  setupCompleted Boolean @default(false) // Tracks if user completed initial setup flow
+
   // Relations
-  donnaConfig    DonnaConfig?
-  donnaBridges   DonnaBridge[]
-  donnaInquiries DonnaInquiry[]
+  donnaConfig        DonnaConfig?
+  legalServiceConfig LegalServiceConfig?
+  donnaBridges       DonnaBridge[]
+  donnaInquiries     DonnaInquiry[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -149,6 +153,53 @@ model DonnaConfig {
   // Triage rules (JSON structure)
   // { deflectPatterns: [...], practiceAreas: [...] }
   triageRules      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([profileId])
+}
+
+// ─────────────────────────────────────────────────────
+// LegalServiceConfig — Lawyer's service & operational config
+// Last agent before orchestrator triage
+// ─────────────────────────────────────────────────────
+
+enum ServiceTier {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ModKonsultasi {
+  PERCUMA
+  BERBAYAR
+}
+
+model LegalServiceConfig {
+  id        String   @id @default(cuid())
+  profileId String   @unique
+  profile   LawyerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  // Jurisdiction
+  negeriOperasi String?        // Main operating state
+  badanPeguam   String[]       // Bar body memberships
+
+  // Operating hours & fees
+  waktuOperasi              String?       @default("isnin-jumaat-9-5")
+  modKonsultasi             ModKonsultasi @default(PERCUMA)
+  yuranKonsultasi           Float?
+  yuranKecemasan            Float?
+  yuranVideoMeeting         Float?
+  yuranVideoMeetingKecemasan Float?
+  yuranMeetingFizikal       Float?
+  yuranMeetingFizikalKecemasan Float?
+
+  // Inquiry contact
+  emelPertanyaan String?
+
+  // Service tier (multi-select array)
+  tierPerkhidmatan String[]  @default([])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

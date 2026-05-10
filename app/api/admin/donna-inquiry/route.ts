@@ -53,12 +53,23 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Fetch profile + donnaConfig + lawyer email
+    // Fetch profile + donnaConfig + legalServiceConfig + lawyer email
     const profile = await db.lawyerProfile.findUnique({
       where: { id: profileId },
       include: {
         user: { select: { email: true, name: true } },
         donnaConfig: { select: { triageRules: true } },
+        legalServiceConfig: {
+          select: {
+            emelPertanyaan: true,
+            tierPerkhidmatan: true,
+            modKonsultasi: true,
+            yuranKonsultasi: true,
+            yuranKecemasan: true,
+            negeriOperasi: true,
+            waktuOperasi: true,
+          },
+        },
       },
     });
 
@@ -66,13 +77,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Profile not found' }, { status: 404 });
     }
 
+    // ── Legal Service Config ─────────────────────────────────
+    const lsc = profile.legalServiceConfig;
+    const allowedTiers = (lsc?.tierPerkhidmatan ?? []) as string[];
+    const inquiryEmail = lsc?.emelPertanyaan || profile.user.email;
+
     // ── Scoring ──────────────────────────────────────────────
     const isBridge = !!bridgeId;
     const rawScore = scoreConcreteScore(issueSummary, isBridge);
     const concreteScore = rawScore * 10; // normalize to 0–100
     const urgencyTag = determineUrgency(issueSummary);
     const sophistication = detectSophistication(issueSummary);
-    const suggestedTier = suggestConversionTier(rawScore, urgencyTag);
+    const rawSuggestedTier = suggestConversionTier(rawScore, urgencyTag);
+
+    // Constrain suggested tier to tiers the lawyer actually offers.
+    // If no tiers configured, pass through as-is.
+    const suggestedTier = allowedTiers.length > 0
+      ? (allowedTiers.includes(rawSuggestedTier)
+          ? rawSuggestedTier
+          : allowedTiers[allowedTiers.length - 1]) // fall back to highest allowed
+      : rawSuggestedTier;
 
     // ── Deflect check ────────────────────────────────────────
     const triageRules = profile.donnaConfig?.triageRules as
@@ -102,7 +126,7 @@ export async function POST(req: NextRequest) {
     });
 
     // ── Email notification (skip if deflected) ───────────────
-    if (!deflected && profile.user.email) {
+    if (!deflected && inquiryEmail) {
       const baseUrl = process.env.NEXTAUTH_URL ?? 'http://localhost:3000';
       const acceptUrl = `${baseUrl}/api/donna-respond?token=${inquiry.acceptToken}&action=accept`;
       const rejectUrl = `${baseUrl}/api/donna-respond?token=${inquiry.rejectToken}&action=reject`;
@@ -118,7 +142,7 @@ export async function POST(req: NextRequest) {
 
       try {
         await sendInquiryEmail({
-          to: profile.user.email,
+          to: inquiryEmail!,
           lawyerName: profile.user.name ?? profile.firmName ?? 'Peguam',
           callerName: clientName || null,
           callerPhone: clientPhone || null,

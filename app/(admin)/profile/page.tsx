@@ -148,18 +148,10 @@ export default function ProfileSetupPage() {
   if (!session) return null;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 p-6">
+    <div className="min-h-screen bg-black p-6">
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <Link href="/" className="text-purple-400 hover:text-purple-300 inline-block">
-              ← Back to Home
-            </Link>
-            <div className="flex items-center gap-2 text-sm text-cream/50">
-              <span>Step 1 of 3</span>
-            </div>
-          </div>
           <h1 className="text-3xl font-bold text-cream mb-2">👤 Digital Card Setup</h1>
           <p className="text-cream/80">Configure your lawyer profile - this is what clients will see</p>
         </div>
@@ -247,6 +239,7 @@ export default function ProfileSetupPage() {
               </p>
             </div>
           </div>
+
 
           {/* SECTION 2: FIRMA */}
           <div className="card-base border border-purple/20 rounded-lg p-6">
@@ -421,6 +414,12 @@ export default function ProfileSetupPage() {
             </div>
           )}
 
+          {/* Step Indicator */}
+          <div className="flex items-center justify-between py-4 px-4 bg-purple-500/10 border border-purple-500/20 rounded-lg">
+            <span className="text-sm font-semibold text-cream">Step 1 of 5: Digital Card</span>
+            <span className="text-xs text-cream/60">Create your lawyer profile & digital card</span>
+          </div>
+
           {/* Buttons */}
           <div className="flex gap-4">
             <button
@@ -430,12 +429,12 @@ export default function ProfileSetupPage() {
             >
               {loading ? 'Saving...' : 'Save Digital Card'}
             </button>
-            <Link href="/donna" className="flex-1">
+            <Link href="/legal-service" className="flex-1">
               <button
                 type="button"
                 className="w-full bg-purple-600 hover:bg-purple-700 text-cream font-semibold py-3 px-6 rounded-lg transition"
               >
-                Next: Step 2 →
+                Next: Step 2 - Legal Service →
               </button>
             </Link>
           </div>

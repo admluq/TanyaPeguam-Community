@@ -5,6 +5,16 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 
+const MAIN_PRACTICE_AREAS = [
+  'Harta Tanah',
+  'Perceraian & Keluarga',
+  'Kes Jenayah',
+  'Kontrak Perniagaan',
+  'Isu Pekerjaan',
+  'Hutang & Kebankrapan',
+  'Sivil Am',
+];
+
 export default function DonnaConfigPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -133,20 +143,16 @@ export default function DonnaConfigPage() {
   if (!session) return null;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 p-6">
+    <div className="min-h-screen bg-black p-6">
       <div className="max-w-2xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <Link href="/profile" className="text-purple-400 hover:text-purple-300 inline-block">
-              ← Back to Digital Card
-            </Link>
-            <div className="flex items-center gap-2 text-sm text-cream/50">
-              <span>Step 2 of 3</span>
-            </div>
-          </div>
-          <h1 className="text-3xl font-bold text-cream mb-2">🤖 Donna AI Configuration</h1>
+          <h1 className="text-3xl font-bold text-cream mb-2">Donna AI Configuration</h1>
           <p className="text-cream/80">Set up AI behavior, personality, and triage rules</p>
+          <div className="flex items-center justify-between mt-4 py-4 px-4 bg-purple-500/10 border border-purple-500/20 rounded-lg">
+            <span className="text-sm font-semibold text-cream">Step 3 of 5: Donna AI Config</span>
+            <span className="text-xs text-cream/60">Configure AI personality and triage rules</span>
+          </div>
         </div>
 
         {/* Form */}
@@ -192,16 +198,58 @@ export default function DonnaConfigPage() {
 
             {/* Practice Areas */}
             <div>
-              <label className="block text-sm font-semibold text-cream mb-2">
+              <label className="block text-sm font-semibold text-cream mb-3">
                 Practice Areas
               </label>
-              <div className="flex gap-2 mb-3">
+
+              {/* Main Practice Area Bubbles */}
+              <div className="flex flex-wrap gap-2 mb-4">
+                {MAIN_PRACTICE_AREAS.map((area) => (
+                  <button
+                    key={area}
+                    type="button"
+                    onClick={() => {
+                      if (form.triageRules.practiceAreas.includes(area)) {
+                        setForm({
+                          ...form,
+                          triageRules: {
+                            ...form.triageRules,
+                            practiceAreas: form.triageRules.practiceAreas.filter((a) => a !== area),
+                          },
+                        });
+                      } else {
+                        setForm({
+                          ...form,
+                          triageRules: {
+                            ...form.triageRules,
+                            practiceAreas: [...form.triageRules.practiceAreas, area],
+                          },
+                        });
+                      }
+                    }}
+                    className={`px-4 py-2 rounded-full text-sm font-medium transition border ${
+                      form.triageRules.practiceAreas.includes(area)
+                        ? 'bg-purple-600 border-purple-400 text-cream'
+                        : 'bg-ink-300 border-purple/30 text-cream/60 hover:bg-ink-200'
+                    }`}
+                  >
+                    {form.triageRules.practiceAreas.includes(area) && <span>✓ </span>}
+                    {area}
+                  </button>
+                ))}
+              </div>
+
+              {/* Lain-lain (Others) Input */}
+              <div>
+                <label className="block text-xs font-semibold text-cream/60 mb-2">
+                  Lain-lain (Others)
+                </label>
                 <input
                   type="text"
                   value={practiceAreaInput}
                   onChange={(e) => setPracticeAreaInput(e.target.value)}
-                  placeholder="e.g. Family Law"
-                  className="flex-1 bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
+                  placeholder="e.g. Intellectual Property"
+                  className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream placeholder-cream/40 focus:outline-none focus:border-purple-500"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -209,71 +257,82 @@ export default function DonnaConfigPage() {
                     }
                   }}
                 />
-                <button
-                  type="button"
-                  onClick={addPracticeArea}
-                  className="bg-purple-600 hover:bg-purple-700 text-cream font-semibold py-2 px-4 rounded-lg transition"
-                >
-                  Add
-                </button>
+                {practiceAreaInput.trim() && (
+                  <button
+                    type="button"
+                    onClick={addPracticeArea}
+                    className="mt-2 text-sm text-purple-400 hover:text-purple-300 font-semibold"
+                  >
+                    ➕ Add "{practiceAreaInput.trim()}"
+                  </button>
+                )}
               </div>
-              <div className="space-y-2">
-                {form.triageRules.practiceAreas.map((area, idx) => (
-                  <div key={idx} className="flex items-center justify-between bg-ink-300 px-4 py-2 rounded-lg">
-                    <span className="text-gray-200">{area}</span>
-                    <button
-                      type="button"
-                      onClick={() => removePracticeArea(idx)}
-                      className="text-red-400 hover:text-red-300 text-sm"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-              </div>
+
+              {/* Custom Practice Areas Display */}
+              {form.triageRules.practiceAreas.some(
+                (area) => !MAIN_PRACTICE_AREAS.includes(area)
+              ) && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {form.triageRules.practiceAreas
+                    .filter((area) => !MAIN_PRACTICE_AREAS.includes(area))
+                    .map((area) => (
+                      <button
+                        key={area}
+                        type="button"
+                        onClick={() => removePracticeArea(form.triageRules.practiceAreas.indexOf(area))}
+                        className="px-3 py-1 rounded-full text-xs font-medium bg-purple-600/20 border border-purple-400/30 text-cream hover:bg-purple-600/30 transition flex items-center gap-1"
+                      >
+                        {area}
+                        <span className="ml-1">✕</span>
+                      </button>
+                    ))}
+                </div>
+              )}
             </div>
 
             {/* Deflect Patterns */}
             <div>
-              <label className="block text-sm font-semibold text-cream mb-2">
-                Deflect Patterns (auto-reject keywords)
-              </label>
-              <div className="flex gap-2 mb-3">
-                <input
-                  type="text"
-                  value={deflectPatternInput}
-                  onChange={(e) => setDeflectPatternInput(e.target.value)}
-                  placeholder="e.g. criminal, tax"
-                  className="flex-1 bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      addDeflectPattern();
-                    }
-                  }}
-                />
+              <div className="flex items-center justify-between mb-3">
+                <label className="block text-sm font-semibold text-cream">
+                  Deflect Patterns (auto-reject keywords)
+                </label>
                 <button
                   type="button"
                   onClick={addDeflectPattern}
-                  className="bg-red-600 hover:bg-red-700 text-cream font-semibold py-2 px-4 rounded-lg transition"
+                  className="text-purple-400 hover:text-purple-300 flex items-center gap-1 text-sm font-semibold"
+                  disabled={!deflectPatternInput.trim()}
                 >
-                  Add
+                  ➕ Add
                 </button>
               </div>
-              <div className="space-y-2">
+
+              <div className="flex flex-wrap gap-3 mb-4">
                 {form.triageRules.deflectPatterns.map((pattern, idx) => (
-                  <div key={idx} className="flex items-center justify-between bg-ink-300 px-4 py-2 rounded-lg">
-                    <span className="text-gray-200">{pattern}</span>
-                    <button
-                      type="button"
-                      onClick={() => removeDeflectPattern(idx)}
-                      className="text-red-400 hover:text-red-300 text-sm"
-                    >
-                      Remove
-                    </button>
-                  </div>
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => removeDeflectPattern(idx)}
+                    className="px-4 py-2 rounded-full text-sm font-medium bg-purple-600 border border-purple-400 text-cream hover:bg-purple-700 transition flex items-center gap-2"
+                  >
+                    ✓ {pattern}
+                    <span className="ml-1 text-xs">✕</span>
+                  </button>
                 ))}
               </div>
+
+              <input
+                type="text"
+                value={deflectPatternInput}
+                onChange={(e) => setDeflectPatternInput(e.target.value)}
+                placeholder="e.g. criminal, tax"
+                className="w-full bg-ink-300 border border-purple/30 rounded-lg px-4 py-2 text-cream placeholder-cream/40 focus:outline-none focus:border-purple-500"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addDeflectPattern();
+                  }
+                }}
+              />
             </div>
 
             {/* Error Message */}
@@ -292,6 +351,14 @@ export default function DonnaConfigPage() {
 
             {/* Buttons */}
             <div className="flex gap-4">
+              <Link href="/legal-service" className="flex-1">
+                <button
+                  type="button"
+                  className="w-full bg-ink-200/30 hover:bg-ink-200/50 text-cream font-semibold py-3 px-6 rounded-lg transition"
+                >
+                  ← Back: Step 2
+                </button>
+              </Link>
               <button
                 type="submit"
                 disabled={loading}
@@ -304,7 +371,7 @@ export default function DonnaConfigPage() {
                   type="button"
                   className="w-full bg-purple-600 hover:bg-purple-700 text-cream font-semibold py-3 px-6 rounded-lg transition"
                 >
-                  Next: Step 3 →
+                  Next: Step 4 - Bridge Manager →
                 </button>
               </Link>
             </div>
