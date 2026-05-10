@@ -5,9 +5,9 @@ import Link from 'next/link';
 export default async function Home() {
   const session = await auth();
 
-  // Redirect authenticated users to dashboard
+  // Redirect authenticated users to admin
   if (session?.user) {
-    redirect('/dashboard');
+    redirect('/admin');
   }
 
   return (
@@ -17,14 +17,14 @@ export default async function Home() {
         <div className="max-w-2xl text-center">
           {/* Logo */}
           <div className="inline-flex items-center gap-3 mb-8">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center shadow-lg">
-              <span className="text-white font-display font-semibold text-lg">TP</span>
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center">
+              <span className="text-white font-bold text-2xl">TP</span>
             </div>
             <span className="text-2xl font-bold text-white">TanyaPeguam</span>
           </div>
 
           {/* Heading */}
-          <h1 className="text-5xl md:text-6xl font-display font-semibold text-white mb-6 leading-tight">
+          <h1 className="text-5xl md:text-6xl font-bold text-white mb-6 leading-tight">
             Donna AI <br />
             <span className="bg-gradient-to-r from-purple-400 to-blue-400 bg-clip-text text-transparent">
               Lawyer Intake Portal
@@ -38,6 +38,25 @@ export default async function Home() {
             Built for Malaysian lawyers.
           </p>
 
+          {/* Features */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-6">
+              <div className="text-2xl mb-2">🤖</div>
+              <h3 className="font-semibold text-white mb-2">AI Orchestration</h3>
+              <p className="text-sm text-gray-400">Multi-agent triage & intake</p>
+            </div>
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-6">
+              <div className="text-2xl mb-2">⚡</div>
+              <h3 className="font-semibold text-white mb-2">Real-Time Routing</h3>
+              <p className="text-sm text-gray-400">Smart client qualification</p>
+            </div>
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-6">
+              <div className="text-2xl mb-2">📊</div>
+              <h3 className="font-semibold text-white mb-2">Analytics</h3>
+              <p className="text-sm text-gray-400">Track intake metrics</p>
+            </div>
+          </div>
+
           {/* CTA Buttons */}
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <Link href="/login">
@@ -48,6 +67,11 @@ export default async function Home() {
             <Link href="/directory">
               <button className="w-full sm:w-auto px-8 py-4 border border-gray-500 hover:border-gray-300 text-white font-semibold rounded-lg transition">
                 Browse Lawyers Directory
+              </button>
+            </Link>
+            <Link href="/profile-setup">
+              <button className="w-full sm:w-auto px-8 py-4 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-lg transition shadow-lg">
+                Create Lawyer Profile
               </button>
             </Link>
           </div>
@@ -83,7 +107,7 @@ export default async function Home() {
               <div>
                 <h3 className="text-xl font-semibold text-white mb-2">Configure Donna AI</h3>
                 <p className="text-gray-300">
-                  Set up Donna's personality, knowledge base, and triage rules. Control how to AI qualifies and routes client intakes.
+                  Set up Donna's personality, knowledge base, and triage rules. Control how the AI qualifies and routes client intakes.
                 </p>
               </div>
             </div>
@@ -95,7 +119,7 @@ export default async function Home() {
               <div>
                 <h3 className="text-xl font-semibold text-white mb-2">Deploy & Monitor</h3>
                 <p className="text-gray-300">
-                  Deploy intake widget to your Facebook Group or website. Monitor all inquiries, triage results, and client conversations in real-time.
+                  Deploy the intake widget to your Facebook Group or website. Monitor all inquiries, triage results, and client conversations in real-time.
                 </p>
               </div>
             </div>

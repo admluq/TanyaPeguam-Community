@@ -75,8 +75,15 @@ model VerificationToken {
 
 // ─────────────────────────────────────────────────────
 // LawyerProfile — The core identity for each lawyer
-// Every user with a lawyer role has exactly one profile
+// Digital Card with comprehensive firm & contact details
 // ─────────────────────────────────────────────────────
+
+enum LawyerStatus {
+  AVAILABLE
+  BUSY
+  AWAY
+  OFFLINE
+}
 
 model LawyerProfile {
   id        String   @id @default(cuid())
@@ -85,11 +92,23 @@ model LawyerProfile {
 
   // Profile identity
   slug      String   @unique // URL-safe identifier
-  firmName  String?  // e.g. "Arif Azmi & Co"
-  bio       String?  @db.Text
+  username  String?  // Display username for Digital Card
 
-  // Social & contact links (JSON structure)
-  // { whatsapp: "+60123456789", linkedin: "url", website: "url", ... }
+  // Peguam (Lawyer Details)
+  status    LawyerStatus @default(AVAILABLE)
+  phone     String?  // Lawyer's personal phone
+  bio       String?  @db.Text // Professional bio (100-word limit)
+
+  // Firma (Firm Details)
+  firmName  String?  // e.g. "Arif Azmi & Co"
+  firmPhone String?  // Firm phone number
+  firmWebsite String? // Firm website URL
+  firmAddress String? @db.Text // Firm physical address
+  googleMapsUrl String? // Google Maps link
+  googleReviewUrl String? // Google Reviews link
+
+  // Media Sosial Profesional (Professional Social Links)
+  // { facebook: "url", instagram: "handle", tiktok: "handle", linkedin: "url", ... }
   socialLinks Json?
 
   // Public visibility
