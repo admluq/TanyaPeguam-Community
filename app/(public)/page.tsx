@@ -5,9 +5,9 @@ import Link from 'next/link';
 export default async function Home() {
   const session = await auth();
 
-  // Redirect authenticated users to admin
+  // Redirect authenticated users to profile setup
   if (session?.user) {
-    redirect('/admin');
+    redirect('/profile');
   }
 
   return (
@@ -58,7 +58,7 @@ export default async function Home() {
           </div>
 
           {/* CTA Buttons */}
-          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+          <div className="flex flex-col sm:flex-row gap-4 justify-center mb-8">
             <Link href="/login">
               <button className="w-full sm:w-auto px-8 py-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition shadow-lg">
                 Sign In with Google
@@ -66,12 +66,7 @@ export default async function Home() {
             </Link>
             <Link href="/directory">
               <button className="w-full sm:w-auto px-8 py-4 border border-gray-500 hover:border-gray-300 text-white font-semibold rounded-lg transition">
-                Browse Lawyers Directory
-              </button>
-            </Link>
-            <Link href="/profile-setup">
-              <button className="w-full sm:w-auto px-8 py-4 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-lg transition shadow-lg">
-                Create Lawyer Profile
+                Browse Lawyers
               </button>
             </Link>
           </div>

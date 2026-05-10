@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import DonnaWidget from '@/components/DonnaWidget';
 
 interface SocialLinks {
   facebook?: string;
@@ -240,6 +241,9 @@ export default function DigitalCardPage({ params }: { params: { slug: string } }
           <p>🏛️ TanyaPeguam Digital Card</p>
         </div>
       </div>
+
+      {/* Donna Widget — floating intake chat */}
+      <DonnaWidget slug={params.slug} />
     </div>
   );
 }

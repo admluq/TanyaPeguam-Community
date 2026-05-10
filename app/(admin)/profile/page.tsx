@@ -18,15 +18,16 @@ export default function ProfileSetupPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   const [form, setForm] = useState({
     // Profile basics
     slug: '',
     username: '',
     status: 'AVAILABLE',
+    position: '',
 
     // Peguam (Lawyer Details)
-    phone: '',
     bio: '',
 
     // Firma (Firm Details)
@@ -35,7 +36,6 @@ export default function ProfileSetupPage() {
     firmWebsite: '',
     firmAddress: '',
     googleMapsUrl: '',
-    googleReviewUrl: '',
 
     // Social Links
     socialFacebook: '',
@@ -71,14 +71,13 @@ export default function ProfileSetupPage() {
           slug: profile.slug || '',
           username: profile.username || '',
           status: profile.status || 'AVAILABLE',
-          phone: profile.phone || '',
+          position: profile.position || '',
           bio: profile.bio || '',
           firmName: profile.firmName || '',
           firmPhone: profile.firmPhone || '',
           firmWebsite: profile.firmWebsite || '',
           firmAddress: profile.firmAddress || '',
           googleMapsUrl: profile.googleMapsUrl || '',
-          googleReviewUrl: profile.googleReviewUrl || '',
           socialFacebook: social.facebook || '',
           socialInstagram: social.instagram || '',
           socialTiktok: social.tiktok || '',
@@ -86,6 +85,11 @@ export default function ProfileSetupPage() {
           socialWhatsapp: social.whatsapp || '',
           isPublic: profile.isPublic || false,
         });
+
+        // Set preview URL if profile has a slug
+        if (profile.slug) {
+          setPreviewUrl(`/${profile.slug}`);
+        }
       }
     } catch (err) {
       console.error('Failed to fetch profile:', err);
@@ -103,14 +107,13 @@ export default function ProfileSetupPage() {
         slug: form.slug,
         username: form.username,
         status: form.status,
-        phone: form.phone,
+        position: form.position,
         bio: form.bio,
         firmName: form.firmName,
         firmPhone: form.firmPhone,
         firmWebsite: form.firmWebsite,
         firmAddress: form.firmAddress,
         googleMapsUrl: form.googleMapsUrl,
-        googleReviewUrl: form.googleReviewUrl,
         socialLinks: {
           facebook: form.socialFacebook,
           instagram: form.socialInstagram,
@@ -149,11 +152,16 @@ export default function ProfileSetupPage() {
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <Link href="/admin" className="text-blue-400 hover:text-blue-300 mb-4 inline-block">
-            ← Back to Admin
-          </Link>
-          <h1 className="text-3xl font-bold text-white mb-2">Digital Card Setup</h1>
-          <p className="text-gray-300">Configure your comprehensive lawyer profile for the directory</p>
+          <div className="flex items-center justify-between mb-4">
+            <Link href="/" className="text-blue-400 hover:text-blue-300 inline-block">
+              ← Back to Home
+            </Link>
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span>Step 1 of 3</span>
+            </div>
+          </div>
+          <h1 className="text-3xl font-bold text-white mb-2">👤 Digital Card Setup</h1>
+          <p className="text-gray-300">Configure your lawyer profile - this is what clients will see</p>
         </div>
 
         {/* Form */}
@@ -206,14 +214,14 @@ export default function ProfileSetupPage() {
                 </select>
               </div>
 
-              {/* Phone */}
+              {/* Position */}
               <div>
-                <label className="block text-sm font-semibold text-white mb-2">Phone (WhatsApp)</label>
+                <label className="block text-sm font-semibold text-white mb-2">Position / Title</label>
                 <input
-                  type="tel"
-                  value={form.phone}
-                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                  placeholder="+60123456789"
+                  type="text"
+                  value={form.position}
+                  onChange={(e) => setForm({ ...form, position: e.target.value })}
+                  placeholder="e.g. Founder / Principal Lawyer"
                   className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2 text-white"
                 />
               </div>
@@ -287,17 +295,6 @@ export default function ProfileSetupPage() {
                   value={form.googleMapsUrl}
                   onChange={(e) => setForm({ ...form, googleMapsUrl: e.target.value })}
                   placeholder="https://maps.google.com/..."
-                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2 text-white"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-semibold text-white mb-2">Google Review URL</label>
-                <input
-                  type="url"
-                  value={form.googleReviewUrl}
-                  onChange={(e) => setForm({ ...form, googleReviewUrl: e.target.value })}
-                  placeholder="https://www.google.com/maps/place/..."
                   className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2 text-white"
                 />
               </div>
@@ -382,7 +379,7 @@ export default function ProfileSetupPage() {
 
           {/* Public Toggle */}
           <div className="bg-slate-800 border border-slate-700 rounded-lg p-6">
-            <label className="flex items-center gap-3 cursor-pointer">
+            <label className="flex items-center gap-3 cursor-pointer mb-4">
               <input
                 type="checkbox"
                 checked={form.isPublic}
@@ -391,9 +388,24 @@ export default function ProfileSetupPage() {
               />
               <span className="font-semibold text-white">Publish Digital Card to Directory</span>
             </label>
-            <p className="text-sm text-gray-400 mt-2">
+            <p className="text-sm text-gray-400 mb-4">
               When enabled, your profile will be visible in the public TanyaPeguam directory
             </p>
+
+            {/* Preview Link */}
+            {previewUrl && form.slug && (
+              <div className="bg-slate-700 rounded-lg p-4">
+                <p className="text-xs text-gray-400 mb-2">Your Digital Card Preview:</p>
+                <a
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-400 hover:text-blue-300 text-sm font-semibold break-all"
+                >
+                  {`${typeof window !== 'undefined' ? window.location.origin : ''}${previewUrl}`}
+                </a>
+              </div>
+            )}
           </div>
 
           {/* Messages */}
@@ -418,12 +430,12 @@ export default function ProfileSetupPage() {
             >
               {loading ? 'Saving...' : 'Save Digital Card'}
             </button>
-            <Link href="/admin/donna-config" className="flex-1">
+            <Link href="/donna" className="flex-1">
               <button
                 type="button"
                 className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-lg transition"
               >
-                Next: Donna Config →
+                Next: Step 2 →
               </button>
             </Link>
           </div>

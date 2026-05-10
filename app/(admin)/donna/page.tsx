@@ -137,11 +137,16 @@ export default function DonnaConfigPage() {
       <div className="max-w-2xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <Link href="/admin" className="text-purple-400 hover:text-purple-300 mb-4 inline-block">
-            ← Back to Admin
-          </Link>
-          <h1 className="text-3xl font-bold text-white mb-2">Donna AI Configuration</h1>
-          <p className="text-gray-300">Step 2 of 2: Set up AI behavior & triage rules</p>
+          <div className="flex items-center justify-between mb-4">
+            <Link href="/profile" className="text-purple-400 hover:text-purple-300 inline-block">
+              ← Back to Digital Card
+            </Link>
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span>Step 2 of 3</span>
+            </div>
+          </div>
+          <h1 className="text-3xl font-bold text-white mb-2">🤖 Donna AI Configuration</h1>
+          <p className="text-gray-300">Set up AI behavior, personality, and triage rules</p>
         </div>
 
         {/* Form */}
@@ -286,15 +291,7 @@ export default function DonnaConfigPage() {
             )}
 
             {/* Buttons */}
-            <div className="flex gap-4 pt-4">
-              <Link href="/admin/profile" className="flex-1">
-                <button
-                  type="button"
-                  className="w-full bg-gray-600 hover:bg-gray-700 text-white font-semibold py-3 px-6 rounded-lg transition"
-                >
-                  ← Back to Profile
-                </button>
-              </Link>
+            <div className="flex gap-4">
               <button
                 type="submit"
                 disabled={loading}
@@ -302,6 +299,14 @@ export default function DonnaConfigPage() {
               >
                 {loading ? 'Saving...' : 'Save Configuration'}
               </button>
+              <Link href="/bridges" className="flex-1">
+                <button
+                  type="button"
+                  className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-lg transition"
+                >
+                  Next: Step 3 →
+                </button>
+              </Link>
             </div>
           </form>
         </div>

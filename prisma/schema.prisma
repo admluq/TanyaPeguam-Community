@@ -115,8 +115,9 @@ model LawyerProfile {
   isPublic  Boolean  @default(false)
 
   // Relations
-  donnaConfig  DonnaConfig?
-  donnaBridges DonnaBridge[]
+  donnaConfig    DonnaConfig?
+  donnaBridges   DonnaBridge[]
+  donnaInquiries DonnaInquiry[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -156,6 +157,65 @@ model DonnaConfig {
 }
 
 // ─────────────────────────────────────────────────────
+// DonnaInquiry — Scored intake record
+// Created when Donna completes an intake session
+// Tracks scoring, status, and accept/reject tokens
+// ─────────────────────────────────────────────────────
+
+enum InquiryStatus {
+  PENDING
+  EMAILED
+  ACCEPTED
+  REJECTED
+  DEFLECTED
+}
+
+model DonnaInquiry {
+  id               String        @id @default(cuid())
+  profileId        String
+  profile          LawyerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  // Client details
+  clientName       String?
+  clientEmail      String?
+  clientPhone      String?
+  practiceArea     String?
+  issueSummary     String?       @db.Text
+
+  // Full transcript
+  transcript       String?       @db.Text
+
+  // Donna scoring output
+  concreteScore    Int           @default(0)   // 0–100
+  urgencyTag       String?       // LOW / MEDIUM / HIGH / CRITICAL
+  sophistication   String?       // LAYPERSON / INFORMED / SOPHISTICATED
+  suggestedTier    String?       // FREE_CONSULT / PAID_CONSULT / FULL_RETAINER
+  deflected        Boolean       @default(false)
+
+  // Accept / Reject magic tokens
+  acceptToken      String        @unique @default(cuid())
+  rejectToken      String        @unique @default(cuid())
+
+  // Status lifecycle
+  status           InquiryStatus @default(PENDING)
+  emailSentAt      DateTime?
+  acceptedAt       DateTime?
+  rejectedAt       DateTime?
+
+  // Optional link to a DonnaBridge session (one-to-one)
+  bridgeId         String?       @unique
+  bridge           DonnaBridge?  @relation(fields: [bridgeId], references: [id])
+
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@index([profileId])
+  @@index([status])
+  @@index([acceptToken])
+  @@index([rejectToken])
+}
+
+// ─────────────────────────────────────────────────────
 // DonnaBridge — Session logger for intakes
 // Each bridge represents one conversation/intake session
 // ─────────────────────────────────────────────────────
@@ -185,6 +245,9 @@ model DonnaBridge {
   clientEmail      String?
   clientPhone      String?
   practiceArea     String?
+
+  // Back-reference to scored inquiry
+  inquiry          DonnaInquiry?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
