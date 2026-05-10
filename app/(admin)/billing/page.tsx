@@ -12,29 +12,29 @@ export default function BillingPage() {
             <Link href="/bridges" className="text-green-400 hover:text-green-300 inline-block">
               ← Back to Bridges
             </Link>
-            <div className="flex items-center gap-2 text-sm text-gray-400">
+            <div className="flex items-center gap-2 text-sm text-cream/50">
               <span>Setup Complete</span>
             </div>
           </div>
-          <h1 className="text-3xl font-bold text-white mb-2">💳 Billing & Subscription</h1>
-          <p className="text-gray-300">Manage your subscription plan</p>
+          <h1 className="text-3xl font-bold text-cream mb-2">💳 Billing & Subscription</h1>
+          <p className="text-cream/80">Manage your subscription plan</p>
         </div>
 
         {/* Form */}
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-8">
+        <div className="card-base border border-gold/20 rounded-lg p-8">
           <div className="text-center py-16">
             <div className="text-5xl mb-4">💳</div>
-            <h2 className="text-2xl font-bold text-white mb-2">Freemium Model (v2)</h2>
-            <p className="text-gray-400 mb-4">
+            <h2 className="text-2xl font-bold text-cream mb-2">Freemium Model (v2)</h2>
+            <p className="text-cream/50 mb-4">
               Billing and subscription management is planned for v2.
             </p>
             <p className="text-sm text-gray-500 mb-6">
-              Current plan: <span className="text-blue-400 font-semibold">Free (Unlimited v1)</span>
+              Current plan: <span className="text-gold-400 font-semibold">Free (Unlimited v1)</span>
             </p>
 
-            <div className="bg-slate-700 rounded-lg p-4 text-left inline-block mb-8">
-              <p className="text-sm text-gray-300 mb-3 font-semibold">v2 Plans (Planned):</p>
-              <ul className="text-xs text-gray-400 space-y-1">
+            <div className="bg-ink-300 rounded-lg p-4 text-left inline-block mb-8">
+              <p className="text-sm text-cream/80 mb-3 font-semibold">v2 Plans (Planned):</p>
+              <ul className="text-xs text-cream/50 space-y-1">
                 <li>✓ Free: Limited intake queries</li>
                 <li>✓ Pro: Unlimited + Advanced analytics</li>
                 <li>✓ Enterprise: Custom integration</li>
@@ -47,14 +47,14 @@ export default function BillingPage() {
             <button
               type="button"
               onClick={() => window.location.href = '/bridges'}
-              className="flex-1 bg-gray-600 hover:bg-gray-700 text-white font-semibold py-3 px-6 rounded-lg transition"
+              className="flex-1 bg-gray-600 hover:bg-gray-700 text-cream font-semibold py-3 px-6 rounded-lg transition"
             >
               ← Back to Bridges
             </button>
             <Link href="/profile" className="flex-1">
               <button
                 type="button"
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition"
+                className="w-full bg-gold-600 hover:bg-gold-700 text-cream font-semibold py-3 px-6 rounded-lg transition"
               >
                 View Digital Card →
               </button>

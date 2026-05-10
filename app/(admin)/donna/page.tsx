@@ -141,20 +141,20 @@ export default function DonnaConfigPage() {
             <Link href="/profile" className="text-purple-400 hover:text-purple-300 inline-block">
               ← Back to Digital Card
             </Link>
-            <div className="flex items-center gap-2 text-sm text-gray-400">
+            <div className="flex items-center gap-2 text-sm text-cream/50">
               <span>Step 2 of 3</span>
             </div>
           </div>
-          <h1 className="text-3xl font-bold text-white mb-2">🤖 Donna AI Configuration</h1>
-          <p className="text-gray-300">Set up AI behavior, personality, and triage rules</p>
+          <h1 className="text-3xl font-bold text-cream mb-2">🤖 Donna AI Configuration</h1>
+          <p className="text-cream/80">Set up AI behavior, personality, and triage rules</p>
         </div>
 
         {/* Form */}
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-8">
+        <div className="card-base border border-gold/20 rounded-lg p-8">
           <form onSubmit={handleSubmit} className="space-y-6">
             {/* KB Context */}
             <div>
-              <label className="block text-sm font-semibold text-white mb-2">
+              <label className="block text-sm font-semibold text-cream mb-2">
                 Knowledge Base Context
               </label>
               <textarea
@@ -162,16 +162,16 @@ export default function DonnaConfigPage() {
                 onChange={(e) => setForm({ ...form, kbContext: e.target.value })}
                 placeholder="Describe your expertise, practice areas, availability, fees, etc. This helps Donna AI understand your capabilities..."
                 rows={4}
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-3 text-white placeholder-gray-400 focus:outline-none focus:border-purple-500"
+                className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-3 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
               />
-              <p className="text-xs text-gray-400 mt-1">
+              <p className="text-xs text-cream/50 mt-1">
                 This context is used by Donna AI to understand client requests and triage appropriately.
               </p>
             </div>
 
             {/* Personality */}
             <div>
-              <label className="block text-sm font-semibold text-white mb-2">
+              <label className="block text-sm font-semibold text-cream mb-2">
                 Donna Personality
               </label>
               <select
@@ -182,7 +182,7 @@ export default function DonnaConfigPage() {
                     personality: e.target.value as 'PROFESSIONAL' | 'SOFT' | 'STRICT',
                   })
                 }
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-purple-500"
+                className="w-full bg-ink-300 border border-gold/30 rounded-lg px-4 py-3 text-cream focus:outline-none focus:border-purple-500"
               >
                 <option value="PROFESSIONAL">Professional (Formal, detailed)</option>
                 <option value="SOFT">Soft (Friendly, approachable)</option>
@@ -192,7 +192,7 @@ export default function DonnaConfigPage() {
 
             {/* Practice Areas */}
             <div>
-              <label className="block text-sm font-semibold text-white mb-2">
+              <label className="block text-sm font-semibold text-cream mb-2">
                 Practice Areas
               </label>
               <div className="flex gap-2 mb-3">
@@ -201,7 +201,7 @@ export default function DonnaConfigPage() {
                   value={practiceAreaInput}
                   onChange={(e) => setPracticeAreaInput(e.target.value)}
                   placeholder="e.g. Family Law"
-                  className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-purple-500"
+                  className="flex-1 bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -212,14 +212,14 @@ export default function DonnaConfigPage() {
                 <button
                   type="button"
                   onClick={addPracticeArea}
-                  className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition"
+                  className="bg-purple-600 hover:bg-purple-700 text-cream font-semibold py-2 px-4 rounded-lg transition"
                 >
                   Add
                 </button>
               </div>
               <div className="space-y-2">
                 {form.triageRules.practiceAreas.map((area, idx) => (
-                  <div key={idx} className="flex items-center justify-between bg-slate-700 px-4 py-2 rounded-lg">
+                  <div key={idx} className="flex items-center justify-between bg-ink-300 px-4 py-2 rounded-lg">
                     <span className="text-gray-200">{area}</span>
                     <button
                       type="button"
@@ -235,7 +235,7 @@ export default function DonnaConfigPage() {
 
             {/* Deflect Patterns */}
             <div>
-              <label className="block text-sm font-semibold text-white mb-2">
+              <label className="block text-sm font-semibold text-cream mb-2">
                 Deflect Patterns (auto-reject keywords)
               </label>
               <div className="flex gap-2 mb-3">
@@ -244,7 +244,7 @@ export default function DonnaConfigPage() {
                   value={deflectPatternInput}
                   onChange={(e) => setDeflectPatternInput(e.target.value)}
                   placeholder="e.g. criminal, tax"
-                  className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-purple-500"
+                  className="flex-1 bg-ink-300 border border-gold/30 rounded-lg px-4 py-2 text-cream placeholder-gray-400 focus:outline-none focus:border-purple-500"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -255,14 +255,14 @@ export default function DonnaConfigPage() {
                 <button
                   type="button"
                   onClick={addDeflectPattern}
-                  className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition"
+                  className="bg-red-600 hover:bg-red-700 text-cream font-semibold py-2 px-4 rounded-lg transition"
                 >
                   Add
                 </button>
               </div>
               <div className="space-y-2">
                 {form.triageRules.deflectPatterns.map((pattern, idx) => (
-                  <div key={idx} className="flex items-center justify-between bg-slate-700 px-4 py-2 rounded-lg">
+                  <div key={idx} className="flex items-center justify-between bg-ink-300 px-4 py-2 rounded-lg">
                     <span className="text-gray-200">{pattern}</span>
                     <button
                       type="button"
@@ -295,14 +295,14 @@ export default function DonnaConfigPage() {
               <button
                 type="submit"
                 disabled={loading}
-                className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white font-semibold py-3 px-6 rounded-lg transition"
+                className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-cream font-semibold py-3 px-6 rounded-lg transition"
               >
                 {loading ? 'Saving...' : 'Save Configuration'}
               </button>
               <Link href="/bridges" className="flex-1">
                 <button
                   type="button"
-                  className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-lg transition"
+                  className="w-full bg-purple-600 hover:bg-purple-700 text-cream font-semibold py-3 px-6 rounded-lg transition"
                 >
                   Next: Step 3 →
                 </button>
@@ -312,9 +312,9 @@ export default function DonnaConfigPage() {
         </div>
 
         {/* Info */}
-        <div className="mt-8 bg-slate-800 border border-slate-700 rounded-lg p-6">
-          <h3 className="text-lg font-semibold text-white mb-3">Configuration Details</h3>
-          <ul className="space-y-2 text-gray-300 text-sm">
+        <div className="mt-8 card-base border border-gold/20 rounded-lg p-6">
+          <h3 className="text-lg font-semibold text-cream mb-3">Configuration Details</h3>
+          <ul className="space-y-2 text-cream/80 text-sm">
             <li>✓ <span className="text-purple-400">Knowledge Base:</span> Helps Donna understand your practice</li>
             <li>✓ <span className="text-purple-400">Personality:</span> Controls Donna's tone when talking to clients</li>
             <li>✓ <span className="text-purple-400">Practice Areas:</span> What types of cases you handle</li>
