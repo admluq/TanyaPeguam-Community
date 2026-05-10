@@ -16,6 +16,180 @@ datasource db {
 }
 
 // ─────────────────────────────────────────────────────
+// Auth — NextAuth v5 required models
+// ─────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  role          UserRole  @default(CLIENT)
+
+  accounts      Account[]
+  sessions      Session[]
+
+  profile       Profile?       @relation(fields: [profileId], references: [id])
+  profileId     String?        @unique
+
+  donnaConfig   DonnaConfig?
+  donnaBridges  DonnaBridge[]
+  donnaInquiries DonnaInquiry[]
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  CLIENT
+}
+
+// ─────────────────────────────────────────────────────
+// DonnaConfig — lawyer's Donna configuration
+// Populated via 5-step setup wizard
+// ─────────────────────────────────────────────────────
+model DonnaConfig {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  practiceAreas String[]
+  jurisdiction String?
+  barCouncil   String?
+  workingHours     Json?
+  firstConsultMode String?
+  consultFee       Float?
+  urgencyFee       Float?
+  sensitivityLevel Int      @default(5)
+  deflectPatterns  String[]
+  emailTo       String?
+  lowTierLabel  String @default("Konsultasi (RM50)")
+  medTierLabel  String @default("Web Call")
+  highTierLabel String @default("Temujanji")
+
+  isComplete Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────
+// DonnaBridge — context links for FB Group handoffs
+// ─────────────────────────────────────────────────────
+model DonnaBridge {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  refCode      String  @unique
+  source       String?
+  question     String  @db.Text
+  practiceArea String?
+  keyFacts     String? @db.Text
+
+  clickCount  Int       @default(0)
+  lastClickAt DateTime?
+
+  expiresAt DateTime?
+  isActive  Boolean   @default(true)
+
+  inquiries DonnaInquiry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([refCode])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────
+// DonnaInquiry — individual intake record
+// ─────────────────────────────────────────────────────
+model DonnaInquiry {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  bridgeId String?
+  bridge   DonnaBridge? @relation(fields: [bridgeId], references: [id])
+
+  callerName  String?
+  callerPhone String?
+  callerEmail String?
+
+  issueSummary String  @db.Text
+  practiceArea String?
+
+  concreteScore  Int    @default(5)
+  urgencyTag     String @default("STANDARD")
+  conversionTier String @default("MED")
+
+  status InquiryStatus @default(CAPTURED)
+
+  emailSentAt DateTime?
+
+  acceptToken String? @unique
+  rejectToken String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+enum InquiryStatus {
+  DEFLECTED
+  CAPTURED
+  EMAILED
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+// ─────────────────────────────────────────────────────
 // Profile — the lawyer's profile page
 // URL: tanyapeguam.com/[slug]
 // ─────────────────────────────────────────────────────

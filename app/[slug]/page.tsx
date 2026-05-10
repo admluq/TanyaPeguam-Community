@@ -1,13 +1,13 @@
 import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
-import { prisma } from '@/lib/db';
+import { db } from '@/lib/db';
 import { ProfileHeader } from '@/components/profile/profile-header';
 import { LinkCard } from '@/components/profile/link-card';
 import { ProfileFooter } from '@/components/profile/profile-footer';
 
 // ─── Static params (SSG for known profiles) ─────────
 export async function generateStaticParams() {
-  const profiles = await prisma.profile.findMany({
+  const profiles = await db.profile.findMany({
     where: { isActive: true },
     select: { slug: true },
   });
@@ -20,7 +20,7 @@ export async function generateMetadata({
 }: {
   params: { slug: string };
 }): Promise<Metadata> {
-  const profile = await prisma.profile.findUnique({
+  const profile = await db.profile.findUnique({
     where: { slug: params.slug },
     select: {
       name: true,
@@ -55,7 +55,7 @@ export default async function ProfilePage({
 }: {
   params: { slug: string };
 }) {
-  const profile = await prisma.profile.findUnique({
+  const profile = await db.profile.findUnique({
     where: { slug: params.slug, isActive: true },
     include: {
       links: {

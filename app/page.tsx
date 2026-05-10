@@ -1,9 +1,9 @@
 import Link from 'next/link';
-import { prisma } from '@/lib/db';
+import { db } from '@/lib/db';
 
 export default async function HomePage() {
   // Fetch active profiles for showcase
-  const profiles = await prisma.profile.findMany({
+  const profiles = await db.profile.findMany({
     where: { isActive: true },
     orderBy: { createdAt: 'desc' },
     take: 12,
