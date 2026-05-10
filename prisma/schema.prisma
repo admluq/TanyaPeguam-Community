@@ -96,7 +96,7 @@ model LawyerProfile {
 
   // Peguam (Lawyer Details)
   status    LawyerStatus @default(AVAILABLE)
-  phone     String?  // Lawyer's personal phone
+  position  String?  // e.g. "Founder / Principal Lawyer"
   bio       String?  @db.Text // Professional bio (100-word limit)
 
   // Firma (Firm Details)
@@ -146,7 +146,7 @@ model DonnaConfig {
   personality      DonnaPersonality @default(PROFESSIONAL)
 
   // Triage rules (JSON structure)
-  // { deflectPatterns: [...], practiceAreas: [...], urgencyFlags: [...] }
+  // { deflectPatterns: [...], practiceAreas: [...] }
   triageRules      Json?
 
   createdAt DateTime @default(now())

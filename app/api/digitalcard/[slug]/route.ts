@@ -16,7 +16,11 @@ export async function GET(
             image: true,
           },
         },
-        donnaConfig: true,
+        donnaConfig: {
+          select: {
+            personality: true,
+          },
+        },
       },
     });
 
