@@ -35,7 +35,7 @@ const FILTER_TABS: { key: FilterKey; label: string }[] = [
   { key: 'COMPLETED', label: 'Complete' },
   { key: 'EXPIRED',   label: 'Expired' },
   { key: 'DELETED',   label: 'Dipadam' },
-  { key: '',          label: 'Semua' },
+  { key: '',          label: 'All' },
 ];
 
 function buildPublicUrl(shortCode: string): string {
@@ -579,7 +579,7 @@ export default function BridgeManagerPage() {
           </div>
           <button onClick={fetchBridges} disabled={loading}
             className="text-xs text-cream/50 hover:text-purple-400 transition disabled:opacity-30">
-            {loading ? '...' : '↻ Muat semula'}
+            {loading ? '...' : '↻ Refresh'}
           </button>
         </div>
 
