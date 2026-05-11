@@ -17,7 +17,9 @@ export default async function Home() {
   if (session?.user) redirect('/profile');
 
   return (
-    <div className="min-h-screen bg-ink-400 text-cream">
+    <div className="min-h-screen text-cream" style={{
+      background: 'linear-gradient(135deg, #1a0a2e 0%, #16213e 50%, #0f3460 100%)'
+    }}>
 
       {/* Subtle decorative grid dots */}
       <div className="pointer-events-none fixed inset-0 opacity-[0.03]"
