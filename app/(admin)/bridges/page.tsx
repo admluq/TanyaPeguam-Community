@@ -22,18 +22,18 @@ interface Bridge {
 }
 
 const STATUS_STYLE: Record<BridgeStatus, { label: string; dot: string; pill: string; dim?: boolean }> = {
-  ACTIVE:    { label: 'Aktif',   dot: 'bg-green-400',  pill: 'text-green-300 bg-green-900/20 border-green-500/30' },
-  COMPLETED: { label: 'Selesai', dot: 'bg-blue-400',   pill: 'text-blue-300 bg-blue-900/20 border-blue-500/30' },
-  EXPIRED:   { label: 'Luput',   dot: 'bg-yellow-500', pill: 'text-yellow-300 bg-yellow-900/20 border-yellow-600/30', dim: true },
+  ACTIVE:    { label: 'Active',   dot: 'bg-green-400',  pill: 'text-green-300 bg-green-900/20 border-green-500/30' },
+  COMPLETED: { label: 'Complete', dot: 'bg-blue-400',   pill: 'text-blue-300 bg-blue-900/20 border-blue-500/30' },
+  EXPIRED:   { label: 'Expired',   dot: 'bg-yellow-500', pill: 'text-yellow-300 bg-yellow-900/20 border-yellow-600/30', dim: true },
   DELETED:   { label: 'Dipadam', dot: 'bg-red-600',    pill: 'text-red-300 bg-red-900/20 border-red-700/30', dim: true },
 };
 
 type FilterKey = '' | BridgeStatus;
 
 const FILTER_TABS: { key: FilterKey; label: string }[] = [
-  { key: 'ACTIVE',    label: 'Aktif' },
-  { key: 'COMPLETED', label: 'Selesai' },
-  { key: 'EXPIRED',   label: 'Luput' },
+  { key: 'ACTIVE',    label: 'Active' },
+  { key: 'COMPLETED', label: 'Complete' },
+  { key: 'EXPIRED',   label: 'Expired' },
   { key: 'DELETED',   label: 'Dipadam' },
   { key: '',          label: 'Semua' },
 ];
@@ -97,25 +97,25 @@ function BridgeCreator({ onCreated }: { onCreated: () => void }) {
 
   return (
     <div className="bg-ink-300/40 border border-purple-500/30 rounded-xl p-6 mb-8">
-      <h3 className="text-sm font-semibold text-cream mb-1 uppercase tracking-wider">Jana Pautan Jambatan</h3>
+      <h3 className="text-sm font-semibold text-cream mb-1 uppercase tracking-wider">Create Bridge Link</h3>
       <p className="text-xs text-cream/50 mb-4">
-        Tampal soalan Facebook + nasihat awal anda → jana pautan unik untuk dikongsi semula.{' '}
-        <span className="text-yellow-400">Luput selepas 3 hari</span> jika tiada tindak balas, atau{' '}
-        <span className="text-yellow-400">30 minit</span> jika sembang terbengkalai.
+        Paste your Facebook question + initial advice → create unique link to share.{' '}
+        <span className="text-yellow-400">Expires after 3 days</span> with no response, or{' '}
+        <span className="text-yellow-400">30 minutes</span> of inactivity.
       </p>
 
       {!result ? (
         <div className="space-y-3">
           <div>
-            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Soalan Pelanggan (dari Facebook)</label>
+            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Customer Question (from Facebook)</label>
             <textarea value={question} onChange={e => { setQuestion(e.target.value); setError(''); }}
-              placeholder="Cth: Developer lari dgn duit rumah saya. Dah bayar 200k tapi rumah x siap."
+              placeholder="E.g. Developer fled with my house money. Paid 200k but house not ready."
               className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 resize-none" rows={2} />
           </div>
           <div>
-            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Nasihat Awal Peguam</label>
+            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Lawyer's Initial Advice</label>
             <textarea value={answer} onChange={e => { setAnswer(e.target.value); setError(''); }}
-              placeholder="Cth: Boleh failkan tuntutan di Tribunal HDA. Saya perlukan S&P dan resit bayaran."
+              placeholder="E.g. Can file claim at HDA Tribunal. I need S&P and receipt of payment."
               className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 resize-none" rows={3} />
           </div>
           {error && <p className="text-red-400 text-xs bg-red-900/20 rounded p-2 border border-red-900/30">{error}</p>}
@@ -125,36 +125,36 @@ function BridgeCreator({ onCreated }: { onCreated: () => void }) {
                 ? 'bg-purple-500/30 text-cream/40 cursor-not-allowed'
                 : 'bg-purple-500 text-ink-500 hover:bg-purple-600 active:scale-95'
             }`}>
-            {loading ? 'Mencipta...' : 'Jana Pautan'}
+            {loading ? 'Creating...' : 'Create Link'}
           </button>
         </div>
       ) : (
         <div className="space-y-3">
           <div className="bg-ink-400/60 border border-green-500/30 rounded-lg p-4">
-            <p className="text-xs text-green-400/80 uppercase tracking-wider mb-2">✓ Pautan Dicipta — Kongsi di Facebook</p>
+            <p className="text-xs text-green-400/80 uppercase tracking-wider mb-2">✓ Link Created — Share on Facebook</p>
             <div className="flex items-center gap-2">
               <code className="text-sm font-mono text-green-400 flex-1 break-all">{url}</code>
               <button onClick={() => copy(url, 'url')}
                 className={`px-3 py-1.5 rounded text-xs font-semibold flex-shrink-0 transition ${
                   copied === 'url' ? 'bg-green-500 text-ink-500' : 'bg-purple-500 text-ink-500 hover:bg-purple-600'
                 }`}>
-                {copied === 'url' ? '✓ Disalin' : 'Salin URL'}
+                {copied === 'url' ? '✓ Copied' : 'Copy URL'}
               </button>
             </div>
           </div>
           <div className="flex items-center gap-2 bg-ink-400/40 border border-ink-300/30 rounded-lg p-3">
-            <span className="text-xs text-cream/50">Kod:</span>
+            <span className="text-xs text-cream/50">Code:</span>
             <code className="text-sm font-mono font-bold text-cream flex-1">{result.shortCode}</code>
             <button onClick={() => copy(result.shortCode, 'code')}
               className={`px-2 py-0.5 rounded text-xs transition ${
                 copied === 'code' ? 'bg-green-500 text-ink-500' : 'bg-ink-300/50 text-cream/60 hover:bg-ink-300'
               }`}>
-              {copied === 'code' ? '✓' : 'Salin'}
+              {copied === 'code' ? '✓' : 'Copy'}
             </button>
           </div>
           <button onClick={() => setResult(null)}
             className="w-full py-2 px-4 rounded-lg text-sm bg-ink-300/30 text-cream/60 hover:bg-ink-300/50 transition">
-            Jana Pautan Lain
+            Create Another Link
           </button>
         </div>
       )}
@@ -229,7 +229,7 @@ function buildLog(bridges: Bridge[]): LogEntry[] {
         clientName: null,
         eventLabel: 'Luput',
         eventColor: 'text-yellow-400',
-        detail: b.turnCount > 0 ? '30 min tiada aktiviti' : 'Tiada tindak balas selama 3 hari',
+        detail: b.turnCount > 0 ? '30 min inactivity' : 'No response for 3 days',
       });
     }
     if (b.status === 'DELETED') {
@@ -256,7 +256,7 @@ function ActivityLog({ bridges }: { bridges: Bridge[] }) {
     return (
       <div className="card-base rounded-2xl p-12 text-center">
         <div className="text-4xl mb-4">📋</div>
-        <p className="text-cream/60 text-sm">Tiada aktiviti jambatan lagi.</p>
+        <p className="text-cream/60 text-sm">No bridge activity yet.</p>
       </div>
     );
   }
@@ -390,13 +390,13 @@ function BridgeRow({
 
           {/* Q&A */}
           <div>
-            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Soalan Asal</p>
+            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Original Question</p>
             <p className="text-sm text-cream/80 whitespace-pre-wrap bg-ink-500/40 rounded p-3 leading-relaxed">
               {bridge.initialQuestion ?? '—'}
             </p>
           </div>
           <div>
-            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Nasihat Awal Peguam</p>
+            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Lawyer's Initial Advice</p>
             <p className="text-sm text-cream/80 whitespace-pre-wrap bg-ink-500/40 rounded p-3 leading-relaxed">
               {bridge.initialAnswer ?? '—'}
             </p>
@@ -405,9 +405,9 @@ function BridgeRow({
           {/* Client info */}
           <div className="grid grid-cols-3 gap-3">
             {[
-              { label: 'Nama',   val: bridge.clientName },
-              { label: 'Telefon', val: bridge.clientPhone },
-              { label: 'E-mel',  val: bridge.clientEmail },
+              { label: 'Name',   val: bridge.clientName },
+              { label: 'Phone', val: bridge.clientPhone },
+              { label: 'Email',  val: bridge.clientEmail },
             ].map(f => (
               <div key={f.label}>
                 <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-0.5">{f.label}</p>
@@ -418,8 +418,8 @@ function BridgeRow({
 
           {/* Timestamps */}
           <div className="text-[10px] text-cream/30 border-t border-ink-300/10 pt-2 space-y-0.5">
-            <p>Dicipta: {formatDate(bridge.createdAt)}</p>
-            <p>Dikemaskini: {formatDate(bridge.updatedAt)}</p>
+            <p>Created: {formatDate(bridge.createdAt)}</p>
+            <p>Updated: {formatDate(bridge.updatedAt)}</p>
           </div>
 
           {/* Actions — hide for already-deleted */}
@@ -428,7 +428,7 @@ function BridgeRow({
               {bridge.status === 'ACTIVE' && (
                 <button onClick={handleComplete} disabled={working}
                   className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-500/20 text-blue-300 hover:bg-blue-500/40 disabled:opacity-40 transition">
-                  {working ? '...' : 'Tanda Selesai'}
+                  {working ? '...' : 'Mark Complete'}
                 </button>
               )}
 
@@ -437,7 +437,7 @@ function BridgeRow({
                 {confirming && (
                   <button onClick={() => setConfirming(false)}
                     className="px-3 py-1.5 rounded-lg text-xs text-cream/60 hover:text-cream transition">
-                    Batal
+                    Cancel
                   </button>
                 )}
                 <button onClick={handleDelete} disabled={working}
@@ -446,7 +446,7 @@ function BridgeRow({
                       ? 'bg-red-500 text-white animate-pulse'
                       : 'bg-red-500/20 text-red-300 hover:bg-red-500/40'
                   }`}>
-                  {working ? 'Memadam...' : confirming ? 'Yakin? Klik sekali lagi' : 'Padam'}
+                  {working ? 'Deleting...' : confirming ? 'Sure? Click again' : 'Delete'}
                 </button>
               </div>
             </div>
@@ -530,17 +530,17 @@ export default function BridgeManagerPage() {
         <div className="mb-8">
           <h1 className="text-3xl font-display font-bold text-purple-gradient mb-1">Bridge Manager</h1>
           <p className="text-sm text-cream/50">
-            Cipta pautan dari soalan Facebook → Donna kumpul maklumat → peguam terima lead.
+            Create link from Facebook question → Donna collects info → lawyer receives lead.
           </p>
         </div>
 
         {/* Stats Strip */}
         <div className="grid grid-cols-4 gap-3 mb-8">
           {[
-            { label: 'Aktif',   value: stats.active,    color: 'text-green-400',  key: 'ACTIVE' },
-            { label: 'Selesai', value: stats.completed, color: 'text-blue-400',   key: 'COMPLETED' },
-            { label: 'Luput',   value: stats.expired,   color: 'text-yellow-400', key: 'EXPIRED' },
-            { label: 'Dipadam', value: stats.deleted,   color: 'text-red-400',    key: 'DELETED' },
+            { label: 'Active',   value: stats.active,    color: 'text-green-400',  key: 'ACTIVE' },
+            { label: 'Complete', value: stats.completed, color: 'text-blue-400',   key: 'COMPLETED' },
+            { label: 'Expired',   value: stats.expired,   color: 'text-yellow-400', key: 'EXPIRED' },
+            { label: 'Deleted', value: stats.deleted,   color: 'text-red-400',    key: 'DELETED' },
           ].map(s => (
             <button key={s.label} onClick={() => setFilter(s.key as FilterKey)}
               className={`card-base rounded-xl p-4 text-center transition hover:border-purple/30 border ${
@@ -593,9 +593,9 @@ export default function BridgeManagerPage() {
             <div className="text-4xl mb-3">
               {filter === 'ACTIVE' ? '🌉' : filter === 'COMPLETED' ? '✅' : filter === 'EXPIRED' ? '⏱' : '🗑'}
             </div>
-            <p className="text-cream/60 text-sm">Tiada jambatan {FILTER_TABS.find(t => t.key === filter)?.label.toLowerCase()}.</p>
+            <p className="text-cream/60 text-sm">No {FILTER_TABS.find(t => t.key === filter)?.label.toLowerCase()} bridges.</p>
             {filter === 'ACTIVE' && (
-              <p className="text-cream/30 text-xs mt-2">Gunakan borang di atas untuk mencipta jambatan baharu.</p>
+              <p className="text-cream/30 text-xs mt-2">Use the form above to create a new bridge.</p>
             )}
           </div>
         ) : (

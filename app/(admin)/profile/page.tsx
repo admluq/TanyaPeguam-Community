@@ -249,7 +249,7 @@ export default function ProfileSetupPage() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-semibold text-cream mb-2">Nama Firma</label>
+                <label className="block text-sm font-semibold text-cream mb-2">Firm Name</label>
                 <input
                   type="text"
                   value={form.firmName}
@@ -260,7 +260,7 @@ export default function ProfileSetupPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-cream mb-2">Telefon Firma</label>
+                <label className="block text-sm font-semibold text-cream mb-2">Firm Phone</label>
                 <input
                   type="tel"
                   value={form.firmPhone}
@@ -271,7 +271,7 @@ export default function ProfileSetupPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-cream mb-2">Laman Web</label>
+                <label className="block text-sm font-semibold text-cream mb-2">Website</label>
                 <input
                   type="url"
                   value={form.firmWebsite}
@@ -295,7 +295,7 @@ export default function ProfileSetupPage() {
 
             {/* Address */}
             <div className="mt-4">
-              <label className="block text-sm font-semibold text-cream mb-2">Alamat Firma</label>
+              <label className="block text-sm font-semibold text-cream mb-2">Firm Address</label>
               <textarea
                 value={form.firmAddress}
                 onChange={(e) => setForm({ ...form, firmAddress: e.target.value })}
