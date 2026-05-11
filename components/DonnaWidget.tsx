@@ -52,6 +52,19 @@ export default function DonnaWidget({
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Scroll to top on initial load if messages are pre-loaded (show greeting first)
+  useEffect(() => {
+    if (hasPreload && messages.length > 0) {
+      // Find the scrollable messages container and scroll to top
+      setTimeout(() => {
+        const scrollContainer = endRef.current?.parentElement;
+        if (scrollContainer) {
+          scrollContainer.scrollTop = 0;
+        }
+      }, 50); // Small delay to ensure DOM is ready
+    }
+  }, []); // Run once on mount
+
   // Auto-start only for floating mode without pre-loaded messages
   useEffect(() => {
     if (hasPreload) return; // greeting already shown — no API call needed
