@@ -62,10 +62,12 @@ export default async function Home() {
           </div>
 
           {/* Heading */}
-          <h1 className="text-5xl lg:text-6xl font-display font-bold text-cream leading-tight mb-6">
-            Penyelesaian Digital
+          <h1 className="text-5xl lg:text-6xl font-display font-bold leading-tight mb-6">
+            <span className="text-cream">Penyelesaian Digital</span>
             <br />
-            <span className="text-gold-400">Untuk Peguam Profesional</span>
+            <span className="text-cream">Untuk</span>
+            <br />
+            <span className="italic text-gold-400">Peguam Profesional</span>
           </h1>
 
           {/* Subtitle */}
