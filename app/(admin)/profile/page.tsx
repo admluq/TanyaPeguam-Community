@@ -152,7 +152,7 @@ export default function ProfileSetupPage() {
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-3xl font-bold text-cream mb-2">👤 Digital Card Setup</h1>
+          <h1 className="text-3xl font-bold text-cream mb-2">Digital Card Setup</h1>
           <p className="text-cream/80">Configure your lawyer profile - this is what clients will see</p>
         </div>
 
@@ -160,8 +160,8 @@ export default function ProfileSetupPage() {
         <form onSubmit={handleSubmit} className="space-y-8">
           {/* SECTION 1: PEGUAM */}
           <div className="card-base border border-purple/20 rounded-lg p-6">
-            <h2 className="text-lg font-bold text-cream mb-4 flex items-center gap-2">
-              👤 Peguam (Lawyer Details)
+            <h2 className="text-lg font-bold text-cream mb-4">
+              Lawyer Details
             </h2>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -243,8 +243,8 @@ export default function ProfileSetupPage() {
 
           {/* SECTION 2: FIRMA */}
           <div className="card-base border border-purple/20 rounded-lg p-6">
-            <h2 className="text-lg font-bold text-cream mb-4 flex items-center gap-2">
-              🏢 Firma (Firm Details)
+            <h2 className="text-lg font-bold text-cream mb-4">
+              Firm Details
             </h2>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -308,13 +308,13 @@ export default function ProfileSetupPage() {
 
           {/* SECTION 3: SOCIAL MEDIA */}
           <div className="card-base border border-purple/20 rounded-lg p-6">
-            <h2 className="text-lg font-bold text-cream mb-4 flex items-center gap-2">
-              📱 Media Sosial Profesional (Professional Socials)
+            <h2 className="text-lg font-bold text-cream mb-4">
+              Professional Socials
             </h2>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-semibold text-cream mb-2">📘 Facebook URL</label>
+                <label className="block text-sm font-semibold text-cream mb-2">Facebook URL</label>
                 <input
                   type="url"
                   value={form.socialFacebook}
@@ -325,7 +325,7 @@ export default function ProfileSetupPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-cream mb-2">📷 Instagram Handle</label>
+                <label className="block text-sm font-semibold text-cream mb-2">Instagram Handle</label>
                 <input
                   type="text"
                   value={form.socialInstagram}
@@ -336,7 +336,7 @@ export default function ProfileSetupPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-cream mb-2">🎵 TikTok Handle</label>
+                <label className="block text-sm font-semibold text-cream mb-2">TikTok Handle</label>
                 <input
                   type="text"
                   value={form.socialTiktok}
@@ -347,7 +347,7 @@ export default function ProfileSetupPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-cream mb-2">💼 LinkedIn URL</label>
+                <label className="block text-sm font-semibold text-cream mb-2">LinkedIn URL</label>
                 <input
                   type="url"
                   value={form.socialLinkedin}
@@ -358,7 +358,7 @@ export default function ProfileSetupPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-cream mb-2">💬 WhatsApp Number</label>
+                <label className="block text-sm font-semibold text-cream mb-2">WhatsApp Number</label>
                 <input
                   type="tel"
                   value={form.socialWhatsapp}

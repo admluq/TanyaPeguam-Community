@@ -5,28 +5,23 @@ import type { Metadata } from 'next';
 
 export const revalidate = 60;
 
-export async function generateMetadata({
-  params,
-}: {
-  params: { slug: string };
-}): Promise<Metadata> {
+const statusStyle: Record<string, { dot: string; label: string; bg: string; border: string }> = {
+  AVAILABLE: { dot: 'bg-green-400',  label: 'Available', bg: 'bg-green-900/30',  border: 'border-green-500/30' },
+  BUSY:      { dot: 'bg-yellow-400', label: 'Busy',      bg: 'bg-yellow-900/30', border: 'border-yellow-500/30' },
+  AWAY:      { dot: 'bg-orange-400', label: 'Away',      bg: 'bg-orange-900/30', border: 'border-orange-500/30' },
+  OFFLINE:   { dot: 'bg-red-400',   label: 'Offline',   bg: 'bg-red-900/30',    border: 'border-red-500/30' },
+};
+
+export async function generateMetadata({ params }: { params: { slug: string } }): Promise<Metadata> {
   const profile = await db.lawyerProfile.findUnique({
     where: { slug: params.slug },
-    include: { user: true },
+    select: { username: true, bio: true, user: { select: { name: true } } },
   });
-
-  if (!profile || !profile.isPublic) {
-    return { title: 'Lawyer not found' };
-  }
-
+  if (!profile) return { title: 'Lawyer not found' };
+  const name = profile.username || profile.user?.name || 'Lawyer';
   return {
-    title: `${profile.user?.name || 'Lawyer'} | TanyaPeguam Directory`,
+    title: `${name} | TanyaPeguam Directory`,
     description: profile.bio || `Lawyer profile on TanyaPeguam`,
-    openGraph: {
-      title: `${profile.user?.name || 'Lawyer'} | TanyaPeguam`,
-      description: profile.bio || 'Registered lawyer',
-      type: 'profile',
-    },
   };
 }
 
@@ -35,160 +30,198 @@ export async function generateStaticParams() {
     where: { isPublic: true },
     select: { slug: true },
   });
-
-  return profiles.map((p) => ({
-    slug: p.slug,
-  }));
+  return profiles.map((p) => ({ slug: p.slug }));
 }
 
-export default async function LawyerProfilePage({
-  params,
-}: {
-  params: { slug: string };
-}) {
+export default async function LawyerProfilePage({ params }: { params: { slug: string } }) {
   const profile = await db.lawyerProfile.findUnique({
     where: { slug: params.slug },
-    include: {
-      user: true,
-      donnaConfig: true,
+    select: {
+      slug: true,
+      username: true,
+      position: true,
+      firmName: true,
+      bio: true,
+      status: true,
+      firmWebsite: true,
+      googleMapsUrl: true,
+      socialLinks: true,
+      isPublic: true,
+      donnaConfig: { select: { id: true } },
+      user: { select: { name: true } },
     },
   });
 
-  if (!profile || !profile.isPublic) {
-    notFound();
-  }
+  if (!profile || !profile.isPublic) notFound();
 
-  const socialLinks = (profile.socialLinks as any) || {};
+  const st = statusStyle[profile.status] ?? statusStyle.OFFLINE;
+  const social = (profile.socialLinks as Record<string, string>) ?? {};
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 p-6">
+    <div className="min-h-screen bg-black p-6">
       <div className="max-w-3xl mx-auto">
-        {/* Header */}
-        <Link href="/directory" className="text-blue-400 hover:text-blue-300 mb-6 inline-block">
+        <Link href="/directory" className="text-purple-400 hover:text-purple-300 mb-8 inline-block text-sm">
           ← Back to Directory
         </Link>
 
         {/* Profile Card */}
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 mb-8">
-          {/* Name & Firm */}
-          <div className="mb-6">
-            <h1 className="text-4xl font-bold text-white mb-2">
-              {profile.user?.name || 'Lawyer'}
+        <div className="border border-white/10 rounded-lg p-8 mb-6 bg-black">
+
+          {/* Identity block */}
+          <div className="mb-8">
+            <h1 className="text-5xl font-bold text-cream mb-3">
+              {profile.username || profile.user?.name || 'Lawyer'}
             </h1>
+
+            {/* Position */}
+            {profile.position && (
+              <p className="text-sm text-purple-400 font-semibold uppercase tracking-widest mb-2">
+                {profile.position}
+              </p>
+            )}
+
+            {/* Firm Name */}
             {profile.firmName && (
-              <p className="text-lg text-gray-300">{profile.firmName}</p>
+              <p className="text-lg text-cream/70 mb-3">{profile.firmName}</p>
             )}
-            {profile.donnaConfig && (
-              <div className="mt-3 flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-green-400"></div>
-                <span className="text-sm text-gray-300">Donna AI Active</span>
-              </div>
-            )}
+
+            {/* Status */}
+            <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full border ${st.bg} ${st.border}`}>
+              <div className={`w-2 h-2 rounded-full ${st.dot} animate-pulse`} />
+              <span className="text-sm text-cream/80 font-medium">{st.label}</span>
+            </div>
           </div>
 
           {/* Bio */}
           {profile.bio && (
-            <div className="mb-8 pb-8 border-b border-slate-700">
-              <p className="text-gray-300 text-lg leading-relaxed">
-                {profile.bio}
-              </p>
+            <div className="mb-8 pb-8 border-b border-white/10">
+              <p className="text-cream/80 text-lg leading-relaxed">{profile.bio}</p>
             </div>
           )}
 
-          {/* Donna Config */}
-          {profile.donnaConfig && (
-            <div className="mb-8 pb-8 border-b border-slate-700">
-              <h2 className="text-xl font-bold text-white mb-4">AI Assistant</h2>
-              <div className="space-y-4">
-                <div>
-                  <p className="text-sm text-gray-400 mb-1">Personality</p>
-                  <p className="inline-block bg-purple-900 text-purple-300 px-3 py-1 rounded text-sm font-semibold">
-                    {profile.donnaConfig.personality}
-                  </p>
-                </div>
-
-                {profile.donnaConfig.kbContext && (
-                  <div>
-                    <p className="text-sm text-gray-400 mb-2">About this Lawyer</p>
-                    <p className="text-gray-300">
-                      {profile.donnaConfig.kbContext}
-                    </p>
+          {/* Contact & Socials */}
+          {(social.whatsapp || social.linkedin || social.facebook || social.instagram || social.tiktok || profile.firmWebsite || profile.googleMapsUrl) && (
+            <div className="space-y-3">
+              {/* WhatsApp */}
+              {social.whatsapp && (
+                <a
+                  href={`https://wa.me/${social.whatsapp.replace(/\D/g, '')}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 p-4 border border-white/10 hover:border-green-500/50 rounded-lg text-cream/80 hover:text-cream transition bg-white/[0.03]"
+                >
+                  <span className="text-xl">💬</span>
+                  <div className="flex-1">
+                    <p className="text-xs text-cream/40 mb-0.5">WhatsApp</p>
+                    <p className="font-medium">{social.whatsapp}</p>
                   </div>
-                )}
+                  <span className="text-white/30 text-sm">→</span>
+                </a>
+              )}
 
-                {profile.donnaConfig.triageRules && typeof profile.donnaConfig.triageRules === 'object' && (
-                  <div>
-                    {Array.isArray((profile.donnaConfig.triageRules as any).practiceAreas) &&
-                      ((profile.donnaConfig.triageRules as any).practiceAreas as string[]).length > 0 && (
-                      <div>
-                        <p className="text-sm text-gray-400 mb-2">Practice Areas</p>
-                        <div className="flex flex-wrap gap-2">
-                          {((profile.donnaConfig.triageRules as any).practiceAreas as string[]).map((area) => (
-                            <span
-                              key={area}
-                              className="bg-blue-900 text-blue-300 px-3 py-1 rounded text-sm"
-                            >
-                              {area}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+              {/* Website */}
+              {profile.firmWebsite && (
+                <a
+                  href={profile.firmWebsite}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 p-4 border border-white/10 hover:border-purple-500/50 rounded-lg text-cream/80 hover:text-cream transition bg-white/[0.03]"
+                >
+                  <span className="text-xl">🌐</span>
+                  <div className="flex-1">
+                    <p className="text-xs text-cream/40 mb-0.5">Laman Web</p>
+                    <p className="font-medium">{profile.firmWebsite}</p>
                   </div>
-                )}
-              </div>
+                  <span className="text-white/30 text-sm">→</span>
+                </a>
+              )}
+
+              {/* Google Maps */}
+              {profile.googleMapsUrl && (
+                <a
+                  href={profile.googleMapsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 p-4 border border-white/10 hover:border-blue-500/50 rounded-lg text-cream/80 hover:text-cream transition bg-white/[0.03]"
+                >
+                  <span className="text-xl">📍</span>
+                  <div className="flex-1">
+                    <p className="text-xs text-cream/40 mb-0.5">Google Maps</p>
+                    <p className="font-medium">Lihat Lokasi</p>
+                  </div>
+                  <span className="text-white/30 text-sm">→</span>
+                </a>
+              )}
+
+              {/* LinkedIn */}
+              {social.linkedin && (
+                <a
+                  href={social.linkedin}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 p-4 border border-white/10 hover:border-blue-400/50 rounded-lg text-cream/80 hover:text-cream transition bg-white/[0.03]"
+                >
+                  <span className="text-xl">💼</span>
+                  <div className="flex-1">
+                    <p className="text-xs text-cream/40 mb-0.5">LinkedIn</p>
+                    <p className="font-medium">View Profile</p>
+                  </div>
+                  <span className="text-white/30 text-sm">→</span>
+                </a>
+              )}
+
+              {/* Facebook */}
+              {social.facebook && (
+                <a
+                  href={social.facebook}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 p-4 border border-white/10 hover:border-blue-600/50 rounded-lg text-cream/80 hover:text-cream transition bg-white/[0.03]"
+                >
+                  <span className="text-xl">📘</span>
+                  <div className="flex-1">
+                    <p className="text-xs text-cream/40 mb-0.5">Facebook</p>
+                    <p className="font-medium">Visit Page</p>
+                  </div>
+                  <span className="text-white/30 text-sm">→</span>
+                </a>
+              )}
+
+              {/* Instagram */}
+              {social.instagram && (
+                <a
+                  href={social.instagram.startsWith('http') ? social.instagram : `https://instagram.com/${social.instagram.replace('@', '')}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 p-4 border border-white/10 hover:border-pink-500/50 rounded-lg text-cream/80 hover:text-cream transition bg-white/[0.03]"
+                >
+                  <span className="text-xl">📷</span>
+                  <div className="flex-1">
+                    <p className="text-xs text-cream/40 mb-0.5">Instagram</p>
+                    <p className="font-medium">{social.instagram}</p>
+                  </div>
+                  <span className="text-white/30 text-sm">→</span>
+                </a>
+              )}
+
+              {/* TikTok */}
+              {social.tiktok && (
+                <a
+                  href={social.tiktok.startsWith('http') ? social.tiktok : `https://tiktok.com/@${social.tiktok.replace('@', '')}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 p-4 border border-white/10 hover:border-white/30 rounded-lg text-cream/80 hover:text-cream transition bg-white/[0.03]"
+                >
+                  <span className="text-xl">🎵</span>
+                  <div className="flex-1">
+                    <p className="text-xs text-cream/40 mb-0.5">TikTok</p>
+                    <p className="font-medium">{social.tiktok}</p>
+                  </div>
+                  <span className="text-white/30 text-sm">→</span>
+                </a>
+              )}
             </div>
           )}
-
-          {/* Social Links */}
-          {Object.keys(socialLinks).length > 0 && (
-            <div>
-              <h2 className="text-xl font-bold text-white mb-4">Contact & Links</h2>
-              <div className="space-y-2">
-                {socialLinks.whatsapp && (
-                  <a
-                    href={`https://wa.me/${socialLinks.whatsapp.replace(/\D/g, '')}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block p-3 bg-green-900 hover:bg-green-800 rounded text-green-300 transition"
-                  >
-                    📱 WhatsApp: {socialLinks.whatsapp}
-                  </a>
-                )}
-                {socialLinks.linkedin && (
-                  <a
-                    href={socialLinks.linkedin}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block p-3 bg-blue-900 hover:bg-blue-800 rounded text-blue-300 transition"
-                  >
-                    🔗 LinkedIn
-                  </a>
-                )}
-                {socialLinks.website && (
-                  <a
-                    href={socialLinks.website}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block p-3 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 transition"
-                  >
-                    🌐 Website
-                  </a>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* CTA */}
-        <div className="bg-purple-900 border border-purple-700 rounded-lg p-6 text-center">
-          <h3 className="text-lg font-bold text-white mb-2">Need Legal Advice?</h3>
-          <p className="text-purple-200 mb-4">
-            Use Donna AI to quickly assess if this lawyer can help with your case.
-          </p>
-          <button className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-6 rounded-lg transition">
-            Start Intake Chat
-          </button>
         </div>
       </div>
     </div>

@@ -77,37 +77,30 @@ export default async function Home() {
             khidmat undang-undang anda.
           </p>
 
-          {/* Stats + Button Row */}
-          <div className="flex items-center justify-between gap-8">
-            {/* Stats */}
-            <div className="flex items-center gap-10">
-              <div>
-                <p className="text-3xl font-bold text-gold-400">3</p>
-                <p className="text-xs text-cream/35 mt-1">Peguam Disahkan</p>
-              </div>
-              <div className="w-px h-10 bg-white/8" />
-              <div>
-                <p className="text-3xl font-bold text-gold-400">24/7</p>
-                <p className="text-xs text-cream/35 mt-1">Donna AI Aktif</p>
-              </div>
-              <div className="w-px h-10 bg-white/8" />
-              <div>
-                <p className="text-3xl font-bold text-gold-400">Free</p>
-                <p className="text-xs text-cream/35 mt-1">Konsultasi Awal</p>
-              </div>
+          {/* Stats Row */}
+          <div className="flex items-center gap-10 mb-6">
+            <div>
+              <p className="text-3xl font-bold text-gold-400">3</p>
+              <p className="text-xs text-cream/35 mt-1">Peguam Disahkan</p>
             </div>
-
-            {/* Directory Button - Right Aligned with Glow */}
-            <Link href="/directory" className="flex-shrink-0">
-              <button className="px-5 py-3 bg-purple-600 border-2 border-purple-400 text-white font-semibold rounded-lg transition text-sm tracking-wide shadow-lg hover:shadow-[0_0_30px_rgba(168,85,245,0.8)]">
-                <div className="text-center whitespace-nowrap">
-                  Lihat
-                  <br />
-                  Peguam Berdaftar →
-                </div>
-              </button>
-            </Link>
+            <div className="w-px h-10 bg-white/8" />
+            <div>
+              <p className="text-3xl font-bold text-gold-400">24/7</p>
+              <p className="text-xs text-cream/35 mt-1">Donna AI Aktif</p>
+            </div>
+            <div className="w-px h-10 bg-white/8" />
+            <div>
+              <p className="text-3xl font-bold text-gold-400">Free</p>
+              <p className="text-xs text-cream/35 mt-1">Konsultasi Awal</p>
+            </div>
           </div>
+
+          {/* Full-Width Directory Button */}
+          <Link href="/directory">
+            <button className="w-full px-8 py-4 bg-purple-600 border-2 border-purple-400 text-white font-bold rounded-lg transition text-lg tracking-wide shadow-lg hover:shadow-[0_0_30px_rgba(168,85,245,0.8)] hover:bg-purple-500">
+              Lihat Peguam Berdaftar →
+            </button>
+          </Link>
         </div>
 
         {/* Right Column — Donna Demo Widget */}

@@ -274,7 +274,8 @@ model DonnaInquiry {
 enum BridgeStatus {
   ACTIVE
   COMPLETED
-  ABANDONED
+  EXPIRED
+  DELETED
   ESCALATED
 }
 
@@ -286,16 +287,41 @@ model DonnaBridge {
   // Session tracking
   shortCode        String   @unique // Short identifier for sharing
   status           BridgeStatus @default(ACTIVE)
+  createdBy        String   @default("lawyer") // 'lawyer' | 'system' | 'inbound'
 
-  // Conversation data
-  transcript       String?  @db.Text // Full conversation log
-  triageResult     Json?    // Result of intake triage
+  // ── IMMUTABLE Source of Truth ─────────────────────
+  // The original FB question + the lawyer's pre-vet answer.
+  // These fields MUST NOT be updated after creation — enforced by
+  // Prisma middleware in lib/db.ts.
+  // Nullable for backfill compatibility; required at lib/bridge.ts layer.
+  initialQuestion  String?  @db.Text
+  initialAnswer    String?  @db.Text
 
-  // Metadata
+  // ── APPEND-ONLY mutable chat log ──────────────────
+  // Array of turns: [{ role: 'user'|'assistant'|'system', content, ts, turnIndex, toolCalls? }]
+  // Only mutated via lib/bridge.ts.appendTurn(). Never overwritten wholesale.
+  chatTranscript   Json?    @default("[]")
+
+  // ── Agent B (triage) output ───────────────────────
+  triageResult     Json?    // { urgency, criticalFlag, deflected, mustHaves, escalationActions }
+
+  // ── Agent C (summarizer) output ───────────────────
+  summary          String?  @db.Text
+
+  // Resume key: server-issued opaque token for widget hydration on refresh
+  conversationId   String?  @unique
+
+  // Metadata (extracted by Agent A's tools, not free-form)
   clientName       String?
   clientEmail      String?
   clientPhone      String?
   practiceArea     String?
+
+  // ── DEPRECATED (kept for backfill, drop in next migration) ─────
+  // Old String transcript field — used to hold either plain initial-context text
+  // or JSON-stringified {question, answer, createdBy}. Migrated into
+  // initialQuestion/initialAnswer by scripts/backfill-bridges.mjs.
+  transcript       String?  @db.Text
 
   // Back-reference to scored inquiry
   inquiry          DonnaInquiry?
@@ -306,4 +332,5 @@ model DonnaBridge {
   @@index([profileId])
   @@index([shortCode])
   @@index([status])
+  @@index([conversationId])
 }

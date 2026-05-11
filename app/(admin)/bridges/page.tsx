@@ -1,202 +1,159 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
+import { useCallback, useEffect, useState } from 'react';
 
-type InquiryStatus = 'PENDING' | 'EMAILED' | 'ACCEPTED' | 'REJECTED' | 'DEFLECTED';
+type BridgeStatus = 'ACTIVE' | 'COMPLETED' | 'EXPIRED' | 'DELETED';
 
-interface Inquiry {
+interface Bridge {
   id: string;
+  shortCode: string;
+  status: BridgeStatus;
+  createdBy: string;
+  initialQuestion: string | null;
+  initialAnswer: string | null;
   clientName: string | null;
   clientEmail: string | null;
   clientPhone: string | null;
   practiceArea: string | null;
-  issueSummary: string | null;
-  concreteScore: number;
-  urgencyTag: string | null;
-  sophistication: string | null;
-  suggestedTier: string | null;
-  deflected: boolean;
-  status: InquiryStatus;
-  emailSentAt: string | null;
-  acceptedAt: string | null;
-  rejectedAt: string | null;
+  summary: string | null;
+  turnCount: number;
   createdAt: string;
+  updatedAt: string;
 }
 
-const STATUS_CONFIG: Record<InquiryStatus, { label: string; dot: string; bg: string }> = {
-  PENDING:   { label: 'Menunggu',  dot: 'bg-yellow-400',  bg: 'bg-yellow-900/20 border-yellow-500/20' },
-  EMAILED:   { label: 'Diemelkan', dot: 'bg-blue-400',    bg: 'bg-blue-900/20 border-blue-500/20' },
-  ACCEPTED:  { label: 'Diterima',  dot: 'bg-green-400',   bg: 'bg-green-900/20 border-green-500/20' },
-  REJECTED:  { label: 'Ditolak',   dot: 'bg-red-400',     bg: 'bg-red-900/20 border-red-500/20' },
-  DEFLECTED: { label: 'Dilentur',  dot: 'bg-gray-400',    bg: 'bg-gray-900/20 border-gray-500/20' },
+const STATUS_STYLE: Record<BridgeStatus, { label: string; dot: string; pill: string; dim?: boolean }> = {
+  ACTIVE:    { label: 'Aktif',   dot: 'bg-green-400',  pill: 'text-green-300 bg-green-900/20 border-green-500/30' },
+  COMPLETED: { label: 'Selesai', dot: 'bg-blue-400',   pill: 'text-blue-300 bg-blue-900/20 border-blue-500/30' },
+  EXPIRED:   { label: 'Luput',   dot: 'bg-yellow-500', pill: 'text-yellow-300 bg-yellow-900/20 border-yellow-600/30', dim: true },
+  DELETED:   { label: 'Dipadam', dot: 'bg-red-600',    pill: 'text-red-300 bg-red-900/20 border-red-700/30', dim: true },
 };
 
-const URGENCY_COLOR: Record<string, string> = {
-  STANDARD: 'text-cream/50',
-  MEDIUM:   'text-orange-400',
-  HIGH:     'text-red-400',
-  CRITICAL: 'text-red-500 font-bold',
-};
+type FilterKey = '' | BridgeStatus;
 
-const TIER_CONFIG: Record<string, { label: string; color: string }> = {
-  LOW: { label: 'Konsultasi Percuma', color: 'text-green-400' },
-  MED: { label: 'Konsultasi Berbayar', color: 'text-indigo-400' },
-  HIGH: { label: 'Penahanan Penuh', color: 'text-purple-400' },
-};
-
-const FILTER_TABS: { key: string; label: string }[] = [
+const FILTER_TABS: { key: FilterKey; label: string }[] = [
+  { key: 'ACTIVE',    label: 'Aktif' },
+  { key: 'COMPLETED', label: 'Selesai' },
+  { key: 'EXPIRED',   label: 'Luput' },
+  { key: 'DELETED',   label: 'Dipadam' },
   { key: '',          label: 'Semua' },
-  { key: 'EMAILED',   label: 'Diemelkan' },
-  { key: 'ACCEPTED',  label: 'Diterima' },
-  { key: 'REJECTED',  label: 'Ditolak' },
-  { key: 'DEFLECTED', label: 'Dilentur' },
 ];
 
-// Bridge Creator Component
-function BridgeCreator() {
+function buildPublicUrl(shortCode: string): string {
+  if (typeof window !== 'undefined') return `${window.location.origin}/b/${shortCode}`;
+  return `/b/${shortCode}`;
+}
+
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleString('ms-MY', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function timeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1)  return 'baru sahaja';
+  if (mins < 60) return `${mins}m lalu`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)  return `${hrs}j lalu`;
+  return `${Math.floor(hrs / 24)}h lalu`;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Bridge Creator
+// ──────────────────────────────────────────────────────────────────
+function BridgeCreator({ onCreated }: { onCreated: () => void }) {
   const [question, setQuestion] = useState('');
-  const [answer, setAnswer] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<{ bridgeId: string; shortCode: string } | null>(null);
-  const [error, setError] = useState('');
-  const [copied, setCopied] = useState(false);
+  const [answer,   setAnswer]   = useState('');
+  const [loading,  setLoading]  = useState(false);
+  const [result,   setResult]   = useState<{ bridgeId: string; shortCode: string } | null>(null);
+  const [error,    setError]    = useState('');
+  const [copied,   setCopied]   = useState<'code' | 'url' | null>(null);
 
-  async function handleCreateBridge() {
-    setError('');
-    setLoading(true);
-
+  async function handleCreate() {
+    setError(''); setLoading(true);
     try {
       const res = await fetch('/api/bridge/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question, answer }),
       });
-
-      if (!res.ok) {
-        const data = await res.json();
-        setError(data.error || 'Gagal mencipta pautan');
-        setLoading(false);
-        return;
-      }
-
+      if (!res.ok) { setError((await res.json().catch(() => ({}))).error || 'Gagal'); return; }
       const data = await res.json();
-      setResult(data);
-      setQuestion(''); // Clear form
-      setAnswer('');
-      setCopied(false);
-    } catch (err) {
-      console.error('Bridge creation error:', err);
-      setError('Ralat rangkaian. Sila cuba lagi.');
-    } finally {
-      setLoading(false);
-    }
+      setResult({ bridgeId: data.bridgeId, shortCode: data.shortCode });
+      setQuestion(''); setAnswer('');
+      onCreated();
+    } catch { setError('Ralat rangkaian.'); }
+    finally  { setLoading(false); }
   }
 
-  async function copyToClipboard() {
-    if (result) {
-      try {
-        await navigator.clipboard.writeText(result.shortCode);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      } catch (err) {
-        console.error('Copy failed:', err);
-      }
-    }
+  async function copy(text: string, field: 'code' | 'url') {
+    try { await navigator.clipboard.writeText(text); setCopied(field); setTimeout(() => setCopied(null), 1800); }
+    catch { /* noop */ }
   }
+
+  const url = result ? buildPublicUrl(result.shortCode) : '';
 
   return (
-    <div className="bg-black border-2 border-yellow-500 rounded-xl p-6 mb-6">
-      <h3 className="text-sm font-semibold text-cream mb-3 uppercase tracking-wider">
-        Jana Pautan Jambatan
-      </h3>
+    <div className="bg-ink-300/40 border border-purple-500/30 rounded-xl p-6 mb-8">
+      <h3 className="text-sm font-semibold text-cream mb-1 uppercase tracking-wider">Jana Pautan Jambatan</h3>
+      <p className="text-xs text-cream/50 mb-4">
+        Tampal soalan Facebook + nasihat awal anda → jana pautan unik untuk dikongsi semula.{' '}
+        <span className="text-yellow-400">Luput selepas 3 hari</span> jika tiada tindak balas, atau{' '}
+        <span className="text-yellow-400">30 minit</span> jika sembang terbengkalai.
+      </p>
 
       {!result ? (
         <div className="space-y-3">
-          {/* Question Input */}
           <div>
-            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">
-              Soalan Pelanggan
-            </label>
-            <textarea
-              value={question}
-              onChange={(e) => {
-                setQuestion(e.target.value);
-                setError('');
-              }}
-              placeholder="Masukkan soalan atau pertanyaan dari Facebook/calon klien..."
-              className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500/30 resize-none"
-              rows={2}
-            />
+            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Soalan Pelanggan (dari Facebook)</label>
+            <textarea value={question} onChange={e => { setQuestion(e.target.value); setError(''); }}
+              placeholder="Cth: Developer lari dgn duit rumah saya. Dah bayar 200k tapi rumah x siap."
+              className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 resize-none" rows={2} />
           </div>
-
-          {/* Answer Input */}
           <div>
-            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">
-              Nasihat Awal Peguam
-            </label>
-            <textarea
-              value={answer}
-              onChange={(e) => {
-                setAnswer(e.target.value);
-                setError('');
-              }}
-              placeholder="Sertakan nasihat awal atau respons anda kepada soalan ini untuk membantu calon klien menilai kesesuaian..."
-              className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500/30 resize-none"
-              rows={3}
-            />
+            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Nasihat Awal Peguam</label>
+            <textarea value={answer} onChange={e => { setAnswer(e.target.value); setError(''); }}
+              placeholder="Cth: Boleh failkan tuntutan di Tribunal HDA. Saya perlukan S&P dan resit bayaran."
+              className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 resize-none" rows={3} />
           </div>
-
-          {error && (
-            <div className="text-red-400 text-xs bg-red-900/20 rounded p-2 border border-red-900/30">
-              {error}
-            </div>
-          )}
-
-          <button
-            onClick={handleCreateBridge}
-            disabled={!question.trim() || !answer.trim() || loading}
+          {error && <p className="text-red-400 text-xs bg-red-900/20 rounded p-2 border border-red-900/30">{error}</p>}
+          <button onClick={handleCreate} disabled={!question.trim() || !answer.trim() || loading}
             className={`w-full py-2 px-4 rounded-lg font-semibold text-sm transition ${
               !question.trim() || !answer.trim() || loading
                 ? 'bg-purple-500/30 text-cream/40 cursor-not-allowed'
                 : 'bg-purple-500 text-ink-500 hover:bg-purple-600 active:scale-95'
-            }`}
-          >
+            }`}>
             {loading ? 'Mencipta...' : 'Jana Pautan'}
           </button>
         </div>
       ) : (
         <div className="space-y-3">
-          <div className="bg-ink-400/40 border border-green-500/30 rounded-lg p-4">
-            <p className="text-xs text-cream/60 uppercase tracking-wider mb-2">Kod Pautan Jambatan</p>
+          <div className="bg-ink-400/60 border border-green-500/30 rounded-lg p-4">
+            <p className="text-xs text-green-400/80 uppercase tracking-wider mb-2">✓ Pautan Dicipta — Kongsi di Facebook</p>
             <div className="flex items-center gap-2">
-              <code className="text-lg font-mono font-bold text-green-400 flex-1">
-                {result.shortCode}
-              </code>
-              <button
-                onClick={copyToClipboard}
-                className={`px-3 py-1.5 rounded text-xs font-semibold transition ${
-                  copied
-                    ? 'bg-green-500 text-ink-500'
-                    : 'bg-purple-500 text-ink-500 hover:bg-purple-600'
-                }`}
-              >
-                {copied ? '✓ Disalin' : 'Salin'}
+              <code className="text-sm font-mono text-green-400 flex-1 break-all">{url}</code>
+              <button onClick={() => copy(url, 'url')}
+                className={`px-3 py-1.5 rounded text-xs font-semibold flex-shrink-0 transition ${
+                  copied === 'url' ? 'bg-green-500 text-ink-500' : 'bg-purple-500 text-ink-500 hover:bg-purple-600'
+                }`}>
+                {copied === 'url' ? '✓ Disalin' : 'Salin URL'}
               </button>
             </div>
-            <p className="text-xs text-cream/50 mt-2">
-              Berkongsi kod ini dengan calon klien. Mereka akan melihat soalan, nasihat anda, dan borang pendaftaran semasa mengakses widget Donna.
-            </p>
           </div>
-
-          <button
-            onClick={() => {
-              setResult(null);
-              setQuestion('');
-              setAnswer('');
-            }}
-            className="w-full py-2 px-4 rounded-lg font-semibold text-sm bg-ink-300/20 text-cream/60 hover:bg-ink-300/30 transition"
-          >
+          <div className="flex items-center gap-2 bg-ink-400/40 border border-ink-300/30 rounded-lg p-3">
+            <span className="text-xs text-cream/50">Kod:</span>
+            <code className="text-sm font-mono font-bold text-cream flex-1">{result.shortCode}</code>
+            <button onClick={() => copy(result.shortCode, 'code')}
+              className={`px-2 py-0.5 rounded text-xs transition ${
+                copied === 'code' ? 'bg-green-500 text-ink-500' : 'bg-ink-300/50 text-cream/60 hover:bg-ink-300'
+              }`}>
+              {copied === 'code' ? '✓' : 'Salin'}
+            </button>
+          </div>
+          <button onClick={() => setResult(null)}
+            className="w-full py-2 px-4 rounded-lg text-sm bg-ink-300/30 text-cream/60 hover:bg-ink-300/50 transition">
             Jana Pautan Lain
           </button>
         </div>
@@ -205,45 +162,364 @@ function BridgeCreator() {
   );
 }
 
-export default function BridgesPage() {
-  const [inquiries, setInquiries]     = useState<Inquiry[]>([]);
-  const [loading, setLoading]         = useState(true);
-  const [filter, setFilter]           = useState('');
-  const [expanded, setExpanded]       = useState<string | null>(null);
+// ──────────────────────────────────────────────────────────────────
+// Semua — Activity Log
+// ──────────────────────────────────────────────────────────────────
+type LogEntry = {
+  key: string;
+  time: string;
+  shortCode: string;
+  question: string | null;
+  clientName: string | null;
+  eventLabel: string;
+  eventColor: string;
+  detail?: string;
+};
 
-  useEffect(() => {
-    fetchInquiries();
-  }, [filter]);
+function buildLog(bridges: Bridge[]): LogEntry[] {
+  const entries: LogEntry[] = [];
 
-  async function fetchInquiries() {
-    setLoading(true);
-    try {
-      const url = `/api/admin/donna-inquiry${filter ? `?status=${filter}` : ''}`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        setInquiries(data.inquiries ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load inquiries:', err);
-    } finally {
-      setLoading(false);
+  for (const b of bridges) {
+    const st = STATUS_STYLE[b.status];
+
+    // Created
+    entries.push({
+      key: `${b.id}-created`,
+      time: b.createdAt,
+      shortCode: b.shortCode,
+      question: b.initialQuestion,
+      clientName: b.clientName,
+      eventLabel: 'Dicipta',
+      eventColor: 'text-purple-400',
+    });
+
+    // Chat started (has turns)
+    if (b.turnCount > 0) {
+      entries.push({
+        key: `${b.id}-chat`,
+        time: b.updatedAt,
+        shortCode: b.shortCode,
+        question: b.initialQuestion,
+        clientName: b.clientName,
+        eventLabel: `Sembang ${b.turnCount}/3`,
+        eventColor: 'text-green-400',
+        detail: b.clientName ? `Nama: ${b.clientName}` : undefined,
+      });
+    }
+
+    // Terminal states
+    if (b.status === 'COMPLETED') {
+      entries.push({
+        key: `${b.id}-completed`,
+        time: b.updatedAt,
+        shortCode: b.shortCode,
+        question: b.initialQuestion,
+        clientName: b.clientName,
+        eventLabel: 'Selesai',
+        eventColor: 'text-blue-400',
+        detail: b.clientName ? `${b.clientName}${b.clientPhone ? ' · ' + b.clientPhone : ''}` : undefined,
+      });
+    }
+    if (b.status === 'EXPIRED') {
+      entries.push({
+        key: `${b.id}-expired`,
+        time: b.updatedAt,
+        shortCode: b.shortCode,
+        question: b.initialQuestion,
+        clientName: null,
+        eventLabel: 'Luput',
+        eventColor: 'text-yellow-400',
+        detail: b.turnCount > 0 ? '30 min tiada aktiviti' : 'Tiada tindak balas selama 3 hari',
+      });
+    }
+    if (b.status === 'DELETED') {
+      entries.push({
+        key: `${b.id}-deleted`,
+        time: b.updatedAt,
+        shortCode: b.shortCode,
+        question: b.initialQuestion,
+        clientName: null,
+        eventLabel: 'Dipadam',
+        eventColor: 'text-red-400',
+        detail: 'URL tidak aktif',
+      });
     }
   }
 
-  function formatDate(iso: string | null) {
-    if (!iso) return '—';
-    return new Date(iso).toLocaleString('ms-MY', {
-      day: '2-digit', month: 'short', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    });
+  return entries.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+}
+
+function ActivityLog({ bridges }: { bridges: Bridge[] }) {
+  const log = buildLog(bridges);
+
+  if (log.length === 0) {
+    return (
+      <div className="card-base rounded-2xl p-12 text-center">
+        <div className="text-4xl mb-4">📋</div>
+        <p className="text-cream/60 text-sm">Tiada aktiviti jambatan lagi.</p>
+      </div>
+    );
   }
 
+  return (
+    <div className="space-y-0.5">
+      <p className="text-xs text-cream/40 mb-3">{log.length} entri aktiviti</p>
+      {log.map(ev => (
+        <div key={ev.key} className="flex items-start gap-3 px-3 py-2.5 rounded-lg hover:bg-ink-300/10 transition group">
+          <span className={`text-xs font-semibold w-16 flex-shrink-0 pt-0.5 ${ev.eventColor}`}>
+            {ev.eventLabel}
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <code className="text-xs font-mono text-purple-400/80">{ev.shortCode}</code>
+              {ev.clientName && <span className="text-xs text-cream/60">· {ev.clientName}</span>}
+            </div>
+            <p className="text-xs text-cream/40 truncate">{ev.detail ?? ev.question ?? '—'}</p>
+          </div>
+          <div className="flex-shrink-0 text-right opacity-60 group-hover:opacity-100 transition">
+            <p className="text-[10px] text-cream/60">{timeAgo(ev.time)}</p>
+            <p className="text-[10px] text-cream/30">{formatDate(ev.time)}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Bridge Row with inline two-step delete confirm
+// ──────────────────────────────────────────────────────────────────
+function BridgeRow({
+  bridge, expanded, onToggle, onDelete, onMarkCompleted,
+}: {
+  bridge: Bridge;
+  expanded: boolean;
+  onToggle: () => void;
+  onDelete: (id: string) => Promise<void>;
+  onMarkCompleted: (id: string) => Promise<void>;
+}) {
+  const [copyDone,   setCopyDone]   = useState(false);
+  const [confirming, setConfirming] = useState(false); // two-step delete
+  const [working,    setWorking]    = useState(false);
+
+  const st       = STATUS_STYLE[bridge.status] ?? STATUS_STYLE.DELETED;
+  const url      = buildPublicUrl(bridge.shortCode);
+  const canShare = bridge.status === 'ACTIVE';
+
+  async function copyUrl(e: React.MouseEvent) {
+    e.stopPropagation();
+    try { await navigator.clipboard.writeText(url); setCopyDone(true); setTimeout(() => setCopyDone(false), 1500); }
+    catch { /* noop */ }
+  }
+
+  async function handleDelete() {
+    if (!confirming) { setConfirming(true); return; }
+    setWorking(true);
+    await onDelete(bridge.id);
+    setWorking(false);
+    setConfirming(false);
+  }
+
+  async function handleComplete() {
+    setWorking(true);
+    await onMarkCompleted(bridge.id);
+    setWorking(false);
+  }
+
+  return (
+    <div className={`card-base rounded-xl border transition-all ${
+      st.dim ? 'opacity-60 border-ink-300/10' : 'border-purple/10 hover:border-purple/30'
+    } bg-ink-300/20`}>
+
+      {/* Summary row */}
+      <button onClick={onToggle} className="w-full text-left p-4">
+        <div className="flex items-start gap-3">
+          <div className={`mt-2 w-2 h-2 rounded-full flex-shrink-0 ${st.dot}`} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <code className="text-sm font-mono font-bold text-purple-400">{bridge.shortCode}</code>
+              <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${st.pill}`}>
+                {st.label}
+              </span>
+              {bridge.clientName && (
+                <><span className="text-xs text-cream/30">·</span><span className="text-xs text-cream/70">{bridge.clientName}</span></>
+              )}
+              {bridge.clientPhone && (
+                <span className="text-xs text-cream/50">{bridge.clientPhone}</span>
+              )}
+              {bridge.turnCount > 0 && (
+                <span className="text-[10px] text-cream/40 bg-cream/5 px-1.5 py-0.5 rounded">
+                  {bridge.turnCount}/3 jawapan
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-cream/50 mt-0.5 line-clamp-1">{bridge.initialQuestion ?? '—'}</p>
+          </div>
+          <div className="flex-shrink-0 flex flex-col items-end gap-1">
+            <p className="text-[10px] text-cream/40">{timeAgo(bridge.createdAt)}</p>
+            {canShare ? (
+              <button onClick={copyUrl}
+                className={`text-[10px] px-2 py-0.5 rounded transition ${
+                  copyDone ? 'bg-green-500 text-ink-500' : 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/40'
+                }`}>
+                {copyDone ? '✓ Disalin' : 'Salin URL'}
+              </button>
+            ) : (
+              <span className="text-[10px] text-cream/20">{st.label}</span>
+            )}
+          </div>
+          <span className="text-cream/30 ml-1 flex-shrink-0 mt-1">{expanded ? '▲' : '▼'}</span>
+        </div>
+      </button>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="border-t border-ink-300/30 px-4 pb-4 pt-3 space-y-4">
+
+          {/* URL */}
+          <div>
+            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Pautan Awam</p>
+            {canShare ? (
+              <code className="text-xs font-mono text-green-400 break-all bg-ink-500/40 block px-2 py-1.5 rounded">{url}</code>
+            ) : (
+              <span className="text-xs text-cream/30 italic">
+                {bridge.status === 'DELETED' ? 'URL dimatikan — pautan tidak aktif' : `Pautan ${st.label.toLowerCase()}`}
+              </span>
+            )}
+          </div>
+
+          {/* Q&A */}
+          <div>
+            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Soalan Asal</p>
+            <p className="text-sm text-cream/80 whitespace-pre-wrap bg-ink-500/40 rounded p-3 leading-relaxed">
+              {bridge.initialQuestion ?? '—'}
+            </p>
+          </div>
+          <div>
+            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Nasihat Awal Peguam</p>
+            <p className="text-sm text-cream/80 whitespace-pre-wrap bg-ink-500/40 rounded p-3 leading-relaxed">
+              {bridge.initialAnswer ?? '—'}
+            </p>
+          </div>
+
+          {/* Client info */}
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: 'Nama',   val: bridge.clientName },
+              { label: 'Telefon', val: bridge.clientPhone },
+              { label: 'E-mel',  val: bridge.clientEmail },
+            ].map(f => (
+              <div key={f.label}>
+                <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-0.5">{f.label}</p>
+                <p className="text-xs text-cream font-medium truncate">{f.val ?? '—'}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Timestamps */}
+          <div className="text-[10px] text-cream/30 border-t border-ink-300/10 pt-2 space-y-0.5">
+            <p>Dicipta: {formatDate(bridge.createdAt)}</p>
+            <p>Dikemaskini: {formatDate(bridge.updatedAt)}</p>
+          </div>
+
+          {/* Actions — hide for already-deleted */}
+          {bridge.status !== 'DELETED' && (
+            <div className="flex items-center gap-2 pt-2 border-t border-ink-300/20">
+              {bridge.status === 'ACTIVE' && (
+                <button onClick={handleComplete} disabled={working}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-500/20 text-blue-300 hover:bg-blue-500/40 disabled:opacity-40 transition">
+                  {working ? '...' : 'Tanda Selesai'}
+                </button>
+              )}
+
+              {/* Two-step delete */}
+              <div className="ml-auto flex items-center gap-2">
+                {confirming && (
+                  <button onClick={() => setConfirming(false)}
+                    className="px-3 py-1.5 rounded-lg text-xs text-cream/60 hover:text-cream transition">
+                    Batal
+                  </button>
+                )}
+                <button onClick={handleDelete} disabled={working}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition disabled:opacity-40 ${
+                    confirming
+                      ? 'bg-red-500 text-white animate-pulse'
+                      : 'bg-red-500/20 text-red-300 hover:bg-red-500/40'
+                  }`}>
+                  {working ? 'Memadam...' : confirming ? 'Yakin? Klik sekali lagi' : 'Padam'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Page
+// ──────────────────────────────────────────────────────────────────
+export default function BridgeManagerPage() {
+  const [bridges,  setBridges]  = useState<Bridge[]>([]);
+  const [loading,  setLoading]  = useState(true);
+  const [filter,   setFilter]   = useState<FilterKey>('ACTIVE');
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [error,    setError]    = useState('');
+
+  const fetchBridges = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const res = await fetch('/api/admin/bridges', { cache: 'no-store' });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? 'Gagal memuatkan');
+      const data = await res.json();
+      setBridges(data.bridges ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ralat rangkaian');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchBridges(); }, [fetchBridges]);
+
+  async function handleDelete(id: string) {
+    const res = await fetch(`/api/admin/bridges/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'DELETED' }),
+    });
+    if (res.ok) {
+      await fetchBridges();
+      setExpanded(null);
+    } else {
+      const data = await res.json().catch(() => ({}));
+      setError(data.error ?? 'Gagal memadam');
+    }
+  }
+
+  async function handleMarkCompleted(id: string) {
+    const res = await fetch(`/api/admin/bridges/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'COMPLETED' }),
+    });
+    if (res.ok) {
+      await fetchBridges();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      setError(data.error ?? 'Gagal mengemaskini');
+    }
+  }
+
+  const filtered = filter ? bridges.filter(b => b.status === filter) : bridges;
+  const isSemua  = filter === '';
+
   const stats = {
-    total:    inquiries.length,
-    accepted: inquiries.filter((i) => i.status === 'ACCEPTED').length,
-    pending:  inquiries.filter((i) => ['PENDING', 'EMAILED'].includes(i.status)).length,
-    deflected: inquiries.filter((i) => i.status === 'DEFLECTED').length,
+    active:    bridges.filter(b => b.status === 'ACTIVE').length,
+    completed: bridges.filter(b => b.status === 'COMPLETED').length,
+    expired:   bridges.filter(b => b.status === 'EXPIRED').length,
+    deleted:   bridges.filter(b => b.status === 'DELETED').length,
   };
 
   return (
@@ -252,198 +528,88 @@ export default function BridgesPage() {
 
         {/* Header */}
         <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <h1 className="text-3xl font-display font-bold text-purple-gradient mb-1">
-              Peti Masuk Pertanyaan
-            </h1>
-            <Link href="/donna" className="text-purple-400 hover:text-purple-300">
-              ← Back: Step 3
-            </Link>
-          </div>
+          <h1 className="text-3xl font-display font-bold text-purple-gradient mb-1">Bridge Manager</h1>
           <p className="text-sm text-cream/50">
-            Semua pertanyaan yang diproses oleh Donna AI
+            Cipta pautan dari soalan Facebook → Donna kumpul maklumat → peguam terima lead.
           </p>
-          <div className="flex items-center justify-between mt-4 py-4 px-4 bg-purple-500/10 border border-purple-500/20 rounded-lg">
-            <span className="text-sm font-semibold text-cream">Step 4 of 5: Bridge Manager</span>
-            <span className="text-xs text-cream/60">Manage intake inquiries and create bridge links</span>
-          </div>
         </div>
 
         {/* Stats Strip */}
         <div className="grid grid-cols-4 gap-3 mb-8">
           {[
-            { label: 'Jumlah',    value: stats.total,     color: 'text-cream' },
-            { label: 'Menunggu',  value: stats.pending,   color: 'text-yellow-400' },
-            { label: 'Diterima',  value: stats.accepted,  color: 'text-green-400' },
-            { label: 'Dilentur',  value: stats.deflected, color: 'text-cream/40' },
-          ].map((s) => (
-            <div key={s.label} className="card-base rounded-xl p-4 text-center">
+            { label: 'Aktif',   value: stats.active,    color: 'text-green-400',  key: 'ACTIVE' },
+            { label: 'Selesai', value: stats.completed, color: 'text-blue-400',   key: 'COMPLETED' },
+            { label: 'Luput',   value: stats.expired,   color: 'text-yellow-400', key: 'EXPIRED' },
+            { label: 'Dipadam', value: stats.deleted,   color: 'text-red-400',    key: 'DELETED' },
+          ].map(s => (
+            <button key={s.label} onClick={() => setFilter(s.key as FilterKey)}
+              className={`card-base rounded-xl p-4 text-center transition hover:border-purple/30 border ${
+                filter === s.key ? 'border-purple/40 bg-purple-500/10' : 'border-transparent'
+              }`}>
               <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
               <p className="text-xs text-cream/50 mt-1">{s.label}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* Bridge Creator */}
-        <BridgeCreator />
-
-        {/* Filter Tabs */}
-        <div className="flex gap-2 mb-6 flex-wrap">
-          {FILTER_TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setFilter(tab.key)}
-              className={`px-4 py-1.5 rounded-full text-xs font-semibold transition border ${
-                filter === tab.key
-                  ? 'bg-purple-500 text-ink-500 border-purple-500'
-                  : 'bg-ink-300/20 text-cream/60 border-purple/10 hover:border-purple/30 hover:text-cream'
-              }`}
-            >
-              {tab.label}
             </button>
           ))}
         </div>
 
-        {/* Inquiry List */}
-        {loading ? (
-          <div className="text-center py-16 text-cream/40">Memuatkan pertanyaan...</div>
-        ) : inquiries.length === 0 ? (
-          <div className="card-base rounded-2xl p-12 text-center">
-            <div className="text-4xl mb-4">📭</div>
-            <p className="text-cream/60 text-sm">Tiada pertanyaan {filter ? 'dalam kategori ini' : 'lagi'}.</p>
-            <p className="text-cream/30 text-xs mt-2">
-              Pertanyaan akan muncul di sini apabila seseorang berinteraksi dengan Donna Widget anda.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {inquiries.map((inquiry) => {
-              const st = STATUS_CONFIG[inquiry.status];
-              const tier = inquiry.suggestedTier ? TIER_CONFIG[inquiry.suggestedTier] : null;
-              const isOpen = expanded === inquiry.id;
-
-              return (
-                <div
-                  key={inquiry.id}
-                  className={`card-base rounded-xl border transition ${st.bg}`}
-                >
-                  {/* Row summary */}
-                  <button
-                    onClick={() => setExpanded(isOpen ? null : inquiry.id)}
-                    className="w-full text-left p-4"
-                  >
-                    <div className="flex items-start gap-3">
-                      {/* Status dot */}
-                      <div className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${st.dot}`} />
-
-                      {/* Main content */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-semibold text-cream">
-                            {inquiry.clientName ?? 'Tidak Dikenali'}
-                          </span>
-                          <span className="text-xs text-cream/40">·</span>
-                          <span className="text-xs text-cream/50">
-                            {inquiry.practiceArea ?? 'Umum'}
-                          </span>
-                          {inquiry.urgencyTag && inquiry.urgencyTag !== 'STANDARD' && (
-                            <span className={`text-xs ${URGENCY_COLOR[inquiry.urgencyTag]}`}>
-                              ⚡ {inquiry.urgencyTag}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-xs text-cream/50 mt-0.5 truncate max-w-lg">
-                          {inquiry.issueSummary ?? '—'}
-                        </p>
-                      </div>
-
-                      {/* Right meta */}
-                      <div className="text-right flex-shrink-0">
-                        <p className="text-xs text-cream/40">{formatDate(inquiry.createdAt)}</p>
-                        <div className="flex items-center justify-end gap-1 mt-1">
-                          <span className="text-xs text-cream/40">Skor:</span>
-                          <span className="text-xs font-bold text-purple-400">{inquiry.concreteScore}</span>
-                        </div>
-                      </div>
-
-                      {/* Chevron */}
-                      <span className="text-cream/30 ml-1 flex-shrink-0 mt-0.5">
-                        {isOpen ? '▲' : '▼'}
-                      </span>
-                    </div>
-                  </button>
-
-                  {/* Expanded detail panel */}
-                  {isOpen && (
-                    <div className="border-t border-ink-300/20 px-4 pb-4 pt-3 space-y-4">
-                      {/* Contact row */}
-                      <div className="grid grid-cols-3 gap-3 text-xs">
-                        <div>
-                          <p className="text-cream/40 uppercase tracking-wider text-[10px] mb-0.5">Telefon</p>
-                          <p className="text-cream font-medium">{inquiry.clientPhone ?? '—'}</p>
-                        </div>
-                        <div>
-                          <p className="text-cream/40 uppercase tracking-wider text-[10px] mb-0.5">E-mel</p>
-                          <p className="text-cream font-medium truncate">{inquiry.clientEmail ?? '—'}</p>
-                        </div>
-                        <div>
-                          <p className="text-cream/40 uppercase tracking-wider text-[10px] mb-0.5">Tahap Bahasa</p>
-                          <p className="text-cream font-medium">{inquiry.sophistication ?? '—'}</p>
-                        </div>
-                      </div>
-
-                      {/* Scores row */}
-                      <div className="grid grid-cols-3 gap-3 text-xs">
-                        <div>
-                          <p className="text-cream/40 uppercase tracking-wider text-[10px] mb-0.5">Skor Konkrit</p>
-                          <p className={`font-bold text-base ${
-                            inquiry.concreteScore >= 70 ? 'text-green-400' :
-                            inquiry.concreteScore >= 40 ? 'text-yellow-400' : 'text-cream/50'
-                          }`}>
-                            {inquiry.concreteScore}/100
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-cream/40 uppercase tracking-wider text-[10px] mb-0.5">Kemendesakan</p>
-                          <p className={`font-semibold ${URGENCY_COLOR[inquiry.urgencyTag ?? 'STANDARD']}`}>
-                            {inquiry.urgencyTag ?? 'STANDARD'}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-cream/40 uppercase tracking-wider text-[10px] mb-0.5">Tier Dicadang</p>
-                          {tier ? (
-                            <p className={`font-semibold ${tier.color}`}>{tier.label}</p>
-                          ) : (
-                            <p className="text-cream/40">—</p>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Issue summary */}
-                      {inquiry.issueSummary && (
-                        <div>
-                          <p className="text-cream/40 uppercase tracking-wider text-[10px] mb-1">Ringkasan Isu</p>
-                          <p className="text-sm text-cream/80 leading-relaxed bg-ink-500/40 rounded-lg p-3">
-                            {inquiry.issueSummary}
-                          </p>
-                        </div>
-                      )}
-
-                      {/* Status timeline */}
-                      <div className="flex items-center gap-4 text-[10px] text-cream/40 pt-1 border-t border-ink-300/10">
-                        <span>Dicipta: {formatDate(inquiry.createdAt)}</span>
-                        {inquiry.emailSentAt && <span>Emel: {formatDate(inquiry.emailSentAt)}</span>}
-                        {inquiry.acceptedAt && <span className="text-green-400">Diterima: {formatDate(inquiry.acceptedAt)}</span>}
-                        {inquiry.rejectedAt && <span className="text-red-400">Ditolak: {formatDate(inquiry.rejectedAt)}</span>}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+        {/* Error banner */}
+        {error && (
+          <div className="mb-4 px-4 py-3 rounded-lg bg-red-900/20 border border-red-500/30 text-red-300 text-sm flex items-center justify-between">
+            <span>{error}</span>
+            <button onClick={() => setError('')} className="text-red-300/60 hover:text-red-300 ml-4">✕</button>
           </div>
         )}
 
+        {/* Bridge Creator */}
+        <BridgeCreator onCreated={fetchBridges} />
+
+        {/* Filter Tabs */}
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex gap-2 flex-wrap">
+            {FILTER_TABS.map(tab => (
+              <button key={tab.key} onClick={() => setFilter(tab.key)}
+                className={`px-4 py-1.5 rounded-full text-xs font-semibold transition border ${
+                  filter === tab.key
+                    ? 'bg-purple-500 text-ink-500 border-purple-500'
+                    : 'bg-ink-300/20 text-cream/60 border-purple/10 hover:border-purple/30 hover:text-cream'
+                }`}>
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <button onClick={fetchBridges} disabled={loading}
+            className="text-xs text-cream/50 hover:text-purple-400 transition disabled:opacity-30">
+            {loading ? '...' : '↻ Muat semula'}
+          </button>
+        </div>
+
+        {/* Content */}
+        {loading ? (
+          <div className="text-center py-16 text-cream/40 text-sm">Memuatkan...</div>
+        ) : isSemua ? (
+          <ActivityLog bridges={bridges} />
+        ) : filtered.length === 0 ? (
+          <div className="card-base rounded-2xl p-12 text-center">
+            <div className="text-4xl mb-3">
+              {filter === 'ACTIVE' ? '🌉' : filter === 'COMPLETED' ? '✅' : filter === 'EXPIRED' ? '⏱' : '🗑'}
+            </div>
+            <p className="text-cream/60 text-sm">Tiada jambatan {FILTER_TABS.find(t => t.key === filter)?.label.toLowerCase()}.</p>
+            {filter === 'ACTIVE' && (
+              <p className="text-cream/30 text-xs mt-2">Gunakan borang di atas untuk mencipta jambatan baharu.</p>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {filtered.map(bridge => (
+              <BridgeRow key={bridge.id} bridge={bridge}
+                expanded={expanded === bridge.id}
+                onToggle={() => setExpanded(expanded === bridge.id ? null : bridge.id)}
+                onDelete={handleDelete}
+                onMarkCompleted={handleMarkCompleted}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,26 +1,15 @@
 import { auth } from '@/auth';
 import { db } from '@/lib/db';
 import { NextRequest, NextResponse } from 'next/server';
-import {
-  scoreConcreteScore,
-  determineUrgency,
-  suggestConversionTier,
-  shouldDeflect,
-  detectSophistication,
-  buildInquirySummary,
-} from '@/lib/donna';
-import { sendInquiryEmail } from '@/lib/email';
-
-const TIER_LABELS: Record<string, string> = {
-  LOW: 'Konsultasi Percuma',
-  MED: 'Konsultasi Berbayar',
-  HIGH: 'Penahanan Penuh',
-};
+import { createInquiry } from '@/lib/inquiry';
 
 /**
  * POST /api/admin/donna-inquiry
  * Called by Donna Widget at end of intake session.
- * Flow: score → check deflect → save → email lawyer → return inquiry id
+ *
+ * The actual scoring + persist + email logic lives in lib/inquiry.ts so
+ * that other server-side code (notably /api/donna-chat) can call it
+ * directly without an inter-route HTTP hop (audit SPOF #10/#11).
  *
  * Body:
  *   profileId      string   — target lawyer profile
@@ -53,127 +42,24 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Fetch profile + donnaConfig + legalServiceConfig + lawyer email
-    const profile = await db.lawyerProfile.findUnique({
-      where: { id: profileId },
-      include: {
-        user: { select: { email: true, name: true } },
-        donnaConfig: { select: { triageRules: true } },
-        legalServiceConfig: {
-          select: {
-            emelPertanyaan: true,
-            tierPerkhidmatan: true,
-            modKonsultasi: true,
-            yuranKonsultasi: true,
-            yuranKecemasan: true,
-            negeriOperasi: true,
-            waktuOperasi: true,
-          },
-        },
-      },
+    const result = await createInquiry({
+      profileId,
+      clientName,
+      clientEmail,
+      clientPhone,
+      practiceArea,
+      issueSummary,
+      transcript,
+      bridgeId,
     });
-
-    if (!profile) {
-      return NextResponse.json({ error: 'Profile not found' }, { status: 404 });
-    }
-
-    // ── Legal Service Config ─────────────────────────────────
-    const lsc = profile.legalServiceConfig;
-    const allowedTiers = (lsc?.tierPerkhidmatan ?? []) as string[];
-    const inquiryEmail = lsc?.emelPertanyaan || profile.user.email;
-
-    // ── Scoring ──────────────────────────────────────────────
-    const isBridge = !!bridgeId;
-    const rawScore = scoreConcreteScore(issueSummary, isBridge);
-    const concreteScore = rawScore * 10; // normalize to 0–100
-    const urgencyTag = determineUrgency(issueSummary);
-    const sophistication = detectSophistication(issueSummary);
-    const rawSuggestedTier = suggestConversionTier(rawScore, urgencyTag);
-
-    // Constrain suggested tier to tiers the lawyer actually offers.
-    // If no tiers configured, pass through as-is.
-    const suggestedTier = allowedTiers.length > 0
-      ? (allowedTiers.includes(rawSuggestedTier)
-          ? rawSuggestedTier
-          : allowedTiers[allowedTiers.length - 1]) // fall back to highest allowed
-      : rawSuggestedTier;
-
-    // ── Deflect check ────────────────────────────────────────
-    const triageRules = profile.donnaConfig?.triageRules as
-      | { deflectPatterns?: string[] }
-      | null;
-    const deflectPatterns = triageRules?.deflectPatterns ?? [];
-    const deflected = shouldDeflect(issueSummary, deflectPatterns);
-
-    // ── Persist inquiry ──────────────────────────────────────
-    const inquiry = await db.donnaInquiry.create({
-      data: {
-        profileId,
-        clientName: clientName || null,
-        clientEmail: clientEmail || null,
-        clientPhone: clientPhone || null,
-        practiceArea: practiceArea || null,
-        issueSummary,
-        transcript: transcript || null,
-        concreteScore,
-        urgencyTag,
-        sophistication,
-        suggestedTier,
-        deflected,
-        status: deflected ? 'DEFLECTED' : 'PENDING',
-        bridgeId: bridgeId || null,
-      },
-    });
-
-    // ── Email notification (skip if deflected) ───────────────
-    if (!deflected && inquiryEmail) {
-      const baseUrl = process.env.NEXTAUTH_URL ?? 'http://localhost:3000';
-      const acceptUrl = `${baseUrl}/api/donna-respond?token=${inquiry.acceptToken}&action=accept`;
-      const rejectUrl = `${baseUrl}/api/donna-respond?token=${inquiry.rejectToken}&action=reject`;
-
-      const summary = buildInquirySummary(
-        clientName,
-        clientPhone,
-        practiceArea,
-        issueSummary,
-        rawScore,
-        urgencyTag
-      );
-
-      try {
-        await sendInquiryEmail({
-          to: inquiryEmail!,
-          lawyerName: profile.user.name ?? profile.firmName ?? 'Peguam',
-          callerName: clientName || null,
-          callerPhone: clientPhone || null,
-          callerEmail: clientEmail || null,
-          practiceArea: practiceArea || null,
-          issueSummary: summary,
-          concreteScore: rawScore,
-          urgencyTag,
-          conversionTier: suggestedTier,
-          tierLabel: TIER_LABELS[suggestedTier] ?? suggestedTier,
-          acceptUrl,
-          rejectUrl,
-        });
-
-        // Mark as EMAILED
-        await db.donnaInquiry.update({
-          where: { id: inquiry.id },
-          data: { status: 'EMAILED', emailSentAt: new Date() },
-        });
-      } catch (emailError) {
-        // Non-fatal: inquiry saved, email failed — log and continue
-        console.error('Email send failed:', emailError);
-      }
-    }
 
     return NextResponse.json({
       success: true,
-      inquiryId: inquiry.id,
-      deflected,
-      urgencyTag,
-      suggestedTier,
+      inquiryId: result.inquiryId,
+      deflected: result.deflected,
+      urgencyTag: result.urgencyTag,
+      suggestedTier: result.suggestedTier,
+      emailSent: result.emailSent,
     });
   } catch (error) {
     console.error('Donna inquiry POST error:', error);

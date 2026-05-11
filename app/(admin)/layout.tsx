@@ -2,7 +2,6 @@ import { auth, signOut } from '@/auth';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
-import { SetupProgress } from '@/components/SetupProgress';
 
 export default async function AdminLayout({
   children,
@@ -16,35 +15,22 @@ export default async function AdminLayout({
     redirect('/login');
   }
 
-  // Fetch user's profile to check setup status
-  const { db } = await import('@/lib/db');
-  const profile = await db.lawyerProfile.findUnique({
-    where: { userId: session.user.id },
-  });
-
-  // Track if user is in initial setup phase
-  const isSetupComplete = profile?.setupCompleted ?? false;
-
   return (
     <div className="flex h-screen bg-ink-500">
       {/* Sidebar */}
       <aside className="w-64 bg-ink-300 border-r border-purple/20 overflow-y-auto flex flex-col">
-        {/* Progress Bar - Show only during initial setup */}
-        {!isSetupComplete && (
-          <div className="flex-shrink-0">
-            <SetupProgress currentStep={1} />
-          </div>
-        )}
-
-        <div className="flex-1 p-6 overflow-y-auto">
+        <div className="flex-1 p-6 overflow-y-auto flex flex-col">
           {/* Logo */}
-          <div className="mb-8">
-            <Link href="/profile" className="flex items-center gap-2 text-xl font-bold text-cream hover:text-purple-400 transition">
+          <div className="mb-6">
+            <Link
+              href="/profile"
+              className="flex items-center gap-2 text-xl font-bold text-cream hover:text-purple-400 transition"
+            >
               <Image
                 src="/tanya-peguam-official-logo-removebg-preview.png"
                 alt="TanyaPeguam"
-                width={32}
-                height={32}
+                width={28}
+                height={28}
                 className="flex-shrink-0"
               />
               TanyaPeguam
@@ -52,26 +38,27 @@ export default async function AdminLayout({
           </div>
 
           {/* User Info */}
-          <div className="mb-8 pb-8 border-b border-purple/20">
+          <div className="mb-6 pb-6 border-b border-purple/20">
             <p className="text-xs text-cream/50 mb-1">Logged in as</p>
-            <p className="text-sm font-semibold text-cream truncate">{session.user?.email}</p>
+            <p className="text-sm font-semibold text-cream truncate">
+              {session.user?.email}
+            </p>
           </div>
 
-          {/* Navigation - Reorganized Step Order */}
-          <nav className="space-y-2">
-            <NavLink href="/profile" label="Step 1: Digital Card" />
-            <NavLink href="/legal-service" label="Step 2: Legal Service Config" />
-            <NavLink href="/donna" label="Step 3: Donna AI Config" />
-            <NavLink href="/bridges" label="Step 4: Bridge Manager" />
-            <NavLink href="#" label="Step 5: Billing" disabled={true} />
+          {/* Navigation */}
+          <nav className="space-y-1">
+            <NavLink href="/profile" label="Digital Card" />
+            <NavLink href="/legal-service" label="Legal Service Config" />
+            <NavLink href="/donna" label="Donna AI Config" />
+            <NavLink href="/bridges" label="Bridge Manager" />
+            <NavLink href="#" label="Billing" disabled />
           </nav>
         </div>
 
         {/* Footer */}
-        <div className="mt-auto pt-8 border-t border-purple/20">
-          <div className="text-xs text-cream/50 mb-4">
+        <div className="p-6 border-t border-purple/20">
+          <div className="text-xs text-cream/40 mb-3 leading-relaxed">
             <p>Admin Panel v1.0</p>
-            <p>Focus: Input Setup</p>
           </div>
           <form
             action={async () => {
@@ -81,7 +68,7 @@ export default async function AdminLayout({
           >
             <button
               type="submit"
-              className="w-full text-left text-sm text-cream/70 hover:text-red-400 transition py-2"
+              className="w-full text-left text-sm text-cream/70 hover:text-red-400 transition py-1"
             >
               Sign Out
             </button>
@@ -108,9 +95,11 @@ function NavLink({
 }) {
   if (disabled) {
     return (
-      <div className="flex items-center justify-between gap-3 px-4 py-2 rounded-lg text-cream/30 cursor-not-allowed">
+      <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-cream/30 cursor-not-allowed">
         <span className="text-sm font-medium">{label}</span>
-        <span className="text-xs text-cream/20 bg-cream/5 px-2 py-0.5 rounded">Coming Soon</span>
+        <span className="text-[10px] uppercase tracking-wider text-cream/30 bg-cream/5 px-2 py-0.5 rounded">
+          Soon
+        </span>
       </div>
     );
   }
@@ -118,9 +107,9 @@ function NavLink({
   return (
     <Link
       href={href}
-      className="flex items-center gap-3 px-4 py-2 rounded-lg text-cream/70 hover:bg-ink-200/30 hover:text-purple-400 transition"
+      className="block px-3 py-2 rounded-lg text-sm font-medium text-cream/70 hover:bg-ink-200/30 hover:text-purple-400 transition"
     >
-      <span className="text-sm font-medium">{label}</span>
+      {label}
     </Link>
   );
 }

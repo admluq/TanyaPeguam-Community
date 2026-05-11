@@ -8,6 +8,23 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// ─── Generic send (used by email-donna.ts) ──────────────────
+export async function sendEmail(opts: {
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+}): Promise<{ messageId: string }> {
+  const info = await transporter.sendMail({
+    from: `"Donna AI" <${process.env.SMTP_USER}>`,
+    to: opts.to,
+    subject: opts.subject,
+    html: opts.html,
+    text: opts.text,
+  });
+  return { messageId: info.messageId };
+}
+
 type InquiryEmailOptions = {
   to: string;
   lawyerName: string;

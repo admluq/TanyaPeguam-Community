@@ -1,8 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Link from 'next/link';
-import DonnaWidget from '@/components/DonnaWidget';
 
 interface SocialLinks {
   facebook?: string;
@@ -12,11 +10,11 @@ interface SocialLinks {
   whatsapp?: string;
 }
 
-const statusColors: Record<string, { bg: string; dot: string; label: string }> = {
-  AVAILABLE: { bg: 'bg-green-900', dot: 'bg-green-400', label: 'Available' },
-  BUSY: { bg: 'bg-yellow-900', dot: 'bg-yellow-400', label: 'Busy' },
-  AWAY: { bg: 'bg-orange-900', dot: 'bg-orange-400', label: 'Away' },
-  OFFLINE: { bg: 'bg-gray-700', dot: 'bg-gray-400', label: 'Offline' },
+const statusConfig: Record<string, { dot: string; label: string }> = {
+  AVAILABLE: { dot: 'bg-green-400',  label: 'Available' },
+  BUSY:      { dot: 'bg-yellow-400', label: 'Busy' },
+  AWAY:      { dot: 'bg-orange-400', label: 'Away' },
+  OFFLINE:   { dot: 'bg-gray-500',   label: 'Offline' },
 };
 
 export default function DigitalCardPage({ params }: { params: { slug: string } }) {
@@ -26,224 +24,233 @@ export default function DigitalCardPage({ params }: { params: { slug: string } }
   useEffect(() => {
     async function fetchProfile() {
       try {
-        const response = await fetch(`/api/digitalcard/${params.slug}`);
-        if (response.ok) {
-          const data = await response.json();
+        const res = await fetch(`/api/digitalcard/${params.slug}`);
+        if (res.ok) {
+          const data = await res.json();
           setProfile(data.profile);
         }
-      } catch (error) {
-        console.error('Failed to load profile:', error);
+      } catch (e) {
+        console.error('Failed to load profile:', e);
       } finally {
         setLoading(false);
       }
     }
-
     fetchProfile();
   }, [params.slug]);
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-ink-400 via-ink-500 to-ink-600 flex items-center justify-center">
-        <div className="text-cream">Loading Digital Card...</div>
+      <div className="min-h-screen bg-black flex items-center justify-center">
+        <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
 
   if (!profile) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-ink-400 via-ink-500 to-ink-600 flex items-center justify-center">
-        <div className="text-cream">Profile not found</div>
+      <div className="min-h-screen bg-black flex items-center justify-center text-cream/50 text-sm">
+        Profil tidak dijumpai.
       </div>
     );
   }
 
+  const displayName: string  = profile.username || profile.user?.name || 'Peguam';
+  const initials: string     = displayName.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
   const socialLinks: SocialLinks = profile.socialLinks || {};
-  const statusInfo = statusColors[profile.status] || statusColors.OFFLINE;
-  const initials = (profile.user?.name || 'AA').split(' ').map((n: string) => n[0]).join('').toUpperCase();
+  const statusInfo = statusConfig[profile.status] || statusConfig.OFFLINE;
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-ink-400 via-ink-500 to-ink-600 p-6">
-      <div className="max-w-2xl mx-auto">
-        {/* Navigation */}
-        <div className="flex items-center justify-between mb-12">
-          <a href="/directory" className="text-purple-400 hover:text-purple-300 text-sm">
-            ← Back to Directory
+    <div className="min-h-screen bg-black text-cream">
+
+      {/* ── Top bar ─────────────────────────────────────────── */}
+      <header className="border-b border-white/10 px-6 py-4">
+        <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <a href="/directory" className="text-sm text-cream/50 hover:text-purple-400 transition">
+            ← TanyaPeguam
           </a>
-          <a href="/" className="text-cream/60 hover:text-cream text-sm">
-            Home
-          </a>
+          <span className="text-xs text-cream/30 font-mono">{params.slug}</span>
         </div>
+      </header>
 
-        {/* Digital Card */}
-        <div className="card-base rounded-2xl p-8">
-          {/* Avatar & Name Section */}
-          <div className="text-center mb-8 pb-8 border-b border-ink-300/20">
-            {/* Avatar */}
-            <div className="w-24 h-24 mx-auto rounded-full border-2 border-purple/40 flex items-center justify-center bg-gradient-to-br from-gold/10 to-gold/5 mb-6">
-              <span className="text-4xl font-bold text-purple-400">{initials}</span>
-            </div>
+      <main className="max-w-4xl mx-auto px-6 py-12">
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-10">
 
-            {/* Name */}
-            <h1 className="text-3xl font-display font-bold text-purple-gradient mb-2">{profile.user?.name || 'Lawyer'}</h1>
+          {/* ── LEFT: Identity ──────────────────────────────── */}
+          <div className="lg:col-span-2 flex flex-col gap-6">
 
-            {/* Position */}
-            {profile.position && (
-              <p className="text-sm text-purple-400 font-semibold uppercase tracking-widest mb-3">
-                {profile.position}
-              </p>
-            )}
-
-            {/* Firm Name */}
-            {profile.firmName && (
-              <p className="text-base text-cream/80 mb-4">{profile.firmName}</p>
-            )}
-
-            {/* Location & Status */}
-            <div className="flex items-center justify-center gap-4">
-              {profile.googleMapsUrl && (
-                <a
-                  href={profile.googleMapsUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-cream/60 hover:text-purple-400 transition"
-                >
-                  📍 Rawang, Selangor
-                </a>
-              )}
-              <div className={`flex items-center gap-2 px-3 py-1 rounded-full ${statusInfo.bg}`}>
-                <div className={`w-2 h-2 rounded-full ${statusInfo.dot}`}></div>
-                <span className="text-xs font-semibold text-cream/80">{statusInfo.label}</span>
+            {/* Avatar + name block */}
+            <div className="flex items-start gap-4">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-600 to-blue-500 flex items-center justify-center text-white font-bold text-xl flex-shrink-0">
+                {initials}
+              </div>
+              <div className="pt-1">
+                <h1 className="text-2xl font-bold text-cream leading-tight">{displayName}</h1>
+                {profile.position && (
+                  <p className="text-xs text-purple-400 font-semibold uppercase tracking-widest mt-1">
+                    {profile.position}
+                  </p>
+                )}
+                {profile.firmName && (
+                  <p className="text-sm text-cream/55 mt-0.5">{profile.firmName}</p>
+                )}
               </div>
             </div>
-          </div>
 
-          {/* Bio */}
-          {profile.bio && (
-            <div className="mb-8 pb-8 border-b border-ink-300/20">
-              <p className="text-cream/80 leading-relaxed text-sm">{profile.bio}</p>
-            </div>
-          )}
-
-          {/* TanyaPeguam Badge & Location Links */}
-          <div className="grid grid-cols-2 gap-4 mb-8 pb-8 border-b border-ink-300/20">
-            {/* Verified Badge */}
-            <div className="bg-ink-300/20 hover:bg-ink-300/30 border border-purple/20 hover:border-purple/40 rounded-lg p-4 text-center transition">
-              <div className="text-xl mb-2">✓</div>
-              <p className="text-xs text-cream/60">Profil Disahkan</p>
-              <p className="text-xs text-purple-400 font-semibold">TanyaPeguam.com</p>
+            {/* Status */}
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${statusInfo.dot}`} />
+              <span className="text-xs text-cream/60">{statusInfo.label}</span>
             </div>
 
-            {/* Google Review */}
-            {profile.googleMapsUrl && (
-              <a
-                href={profile.googleMapsUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="bg-ink-300/20 hover:bg-ink-300/30 border border-purple/20 hover:border-purple/40 rounded-lg p-4 text-center transition"
-              >
-                <div className="text-lg mb-2">⭐</div>
-                <p className="text-xs text-cream/60">Google Review</p>
-                <p className="text-xs text-purple-400 font-semibold">Lihat Review</p>
-              </a>
+            {/* Bio */}
+            {profile.bio && (
+              <div className="border-t border-white/10 pt-5">
+                <p className="text-sm text-cream/75 leading-relaxed">{profile.bio}</p>
+              </div>
             )}
+
+            {/* Verified badge */}
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-purple-500/30 bg-purple-900/10 w-fit">
+              <span className="text-purple-400 text-xs">✦</span>
+              <span className="text-xs text-purple-300 font-semibold">TanyaPeguam Verified</span>
+            </div>
           </div>
 
-          {/* Contact Buttons */}
-          <div className="space-y-3 mb-8 pb-8 border-b border-ink-300/20">
+          {/* ── RIGHT: Contact & Links ──────────────────────── */}
+          <div className="lg:col-span-3 flex flex-col gap-5">
+
+            <p className="text-[10px] text-cream/40 uppercase tracking-widest">Hubungi</p>
+
             {/* WhatsApp */}
             {socialLinks.whatsapp && (
               <a
                 href={`https://wa.me/${socialLinks.whatsapp.replace(/\D/g, '')}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-3 p-4 bg-green-900/30 hover:bg-green-900/50 rounded-lg transition"
+                className="flex items-center gap-3 px-5 py-4 rounded-xl border border-white/10 hover:border-green-500/40 hover:bg-green-900/10 transition group"
               >
                 <span className="text-xl">💬</span>
-                <div className="flex-1">
-                  <p className="text-xs text-cream/60">Hubungi Saya</p>
-                  <p className="text-sm font-semibold text-green-400">{socialLinks.whatsapp}</p>
+                <div>
+                  <p className="text-xs text-cream/40 mb-0.5">WhatsApp</p>
+                  <p className="text-sm font-semibold text-cream group-hover:text-green-300 transition">
+                    {socialLinks.whatsapp}
+                  </p>
                 </div>
-                <span className="text-cream/40">→</span>
               </a>
             )}
 
-            {/* Website */}
+            {/* Firm website */}
             {profile.firmWebsite && (
               <a
                 href={profile.firmWebsite}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-3 p-4 bg-purple-900/20 hover:bg-purple-900/30 border border-purple/20 hover:border-purple/40 rounded-lg transition"
+                className="flex items-center gap-3 px-5 py-4 rounded-xl border border-white/10 hover:border-purple-500/40 hover:bg-purple-900/10 transition group"
               >
                 <span className="text-xl">🌐</span>
-                <div className="flex-1">
-                  <p className="text-xs text-cream/60">Firma Website</p>
-                  <p className="text-sm font-semibold text-purple-400">{profile.firmWebsite}</p>
+                <div>
+                  <p className="text-xs text-cream/40 mb-0.5">Laman Web</p>
+                  <p className="text-sm font-semibold text-cream group-hover:text-purple-300 transition">
+                    {profile.firmWebsite.replace(/^https?:\/\//, '')}
+                  </p>
                 </div>
-                <span className="text-cream/40">→</span>
               </a>
+            )}
+
+            {/* Google Maps */}
+            {profile.googleMapsUrl && (
+              <a
+                href={profile.googleMapsUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-3 px-5 py-4 rounded-xl border border-white/10 hover:border-blue-500/40 hover:bg-blue-900/10 transition group"
+              >
+                <span className="text-xl">📍</span>
+                <div>
+                  <p className="text-xs text-cream/40 mb-0.5">Lokasi Firma</p>
+                  <p className="text-sm font-semibold text-cream group-hover:text-blue-300 transition">
+                    {profile.firmAddress || 'Lihat di Google Maps'}
+                  </p>
+                </div>
+              </a>
+            )}
+
+            {/* Social icons row */}
+            {(socialLinks.linkedin || socialLinks.facebook || socialLinks.instagram || socialLinks.tiktok) && (
+              <div className="border-t border-white/10 pt-5">
+                <p className="text-[10px] text-cream/40 uppercase tracking-widest mb-3">Media Sosial</p>
+                <div className="flex gap-3">
+                  {socialLinks.linkedin && (
+                    <a
+                      href={socialLinks.linkedin}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-10 h-10 rounded-xl border border-white/10 hover:border-blue-400/50 hover:bg-blue-900/20 flex items-center justify-center transition text-lg"
+                      title="LinkedIn"
+                    >
+                      in
+                    </a>
+                  )}
+                  {socialLinks.facebook && (
+                    <a
+                      href={socialLinks.facebook}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-10 h-10 rounded-xl border border-white/10 hover:border-blue-500/50 hover:bg-blue-900/20 flex items-center justify-center transition text-sm font-bold text-blue-400"
+                      title="Facebook"
+                    >
+                      f
+                    </a>
+                  )}
+                  {socialLinks.instagram && (
+                    <a
+                      href={socialLinks.instagram}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-10 h-10 rounded-xl border border-white/10 hover:border-pink-500/50 hover:bg-pink-900/20 flex items-center justify-center transition text-lg"
+                      title="Instagram"
+                    >
+                      📸
+                    </a>
+                  )}
+                  {socialLinks.tiktok && (
+                    <a
+                      href={socialLinks.tiktok}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-10 h-10 rounded-xl border border-white/10 hover:border-white/30 hover:bg-white/5 flex items-center justify-center transition text-lg"
+                      title="TikTok"
+                    >
+                      🎵
+                    </a>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Google Review */}
+            {profile.googleReviewUrl && (
+              <div className="border-t border-white/10 pt-5">
+                <a
+                  href={profile.googleReviewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 text-sm text-yellow-400 hover:text-yellow-300 transition"
+                >
+                  ⭐ Tinggalkan ulasan Google
+                </a>
+              </div>
             )}
           </div>
 
-          {/* Social Links */}
-          {Object.keys(socialLinks).length > 1 && (
-            <div className="space-y-2">
-              {socialLinks.facebook && (
-                <a
-                  href={socialLinks.facebook}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-3 p-3 bg-ink-300/20 hover:bg-ink-300/30 border border-purple/10 hover:border-purple/30 rounded-lg transition text-sm"
-                >
-                  <span>📘</span>
-                  <span className="flex-1 font-semibold text-blue-300">Facebook</span>
-                </a>
-              )}
-              {socialLinks.instagram && (
-                <a
-                  href={socialLinks.instagram}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-3 p-3 bg-ink-300/20 hover:bg-ink-300/30 border border-purple/10 hover:border-purple/30 rounded-lg transition text-sm"
-                >
-                  <span>📷</span>
-                  <span className="flex-1 font-semibold text-pink-300">{socialLinks.instagram}</span>
-                </a>
-              )}
-              {socialLinks.tiktok && (
-                <a
-                  href={socialLinks.tiktok}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-3 p-3 bg-ink-300/20 hover:bg-ink-300/30 border border-purple/10 hover:border-purple/30 rounded-lg transition text-sm"
-                >
-                  <span>🎵</span>
-                  <span className="flex-1 font-semibold text-cream/80">{socialLinks.tiktok}</span>
-                </a>
-              )}
-              {socialLinks.linkedin && (
-                <a
-                  href={socialLinks.linkedin}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-3 p-3 bg-ink-300/20 hover:bg-ink-300/30 border border-purple/10 hover:border-purple/30 rounded-lg transition text-sm"
-                >
-                  <span>💼</span>
-                  <span className="flex-1 font-semibold text-blue-300">LinkedIn</span>
-                </a>
-              )}
-            </div>
-          )}
         </div>
+      </main>
 
-        {/* Footer Info */}
-        <div className="text-center mt-8 text-xs text-cream/40">
-          <p>🏛️ TanyaPeguam Digital Card</p>
-        </div>
-      </div>
+      {/* ── Footer ──────────────────────────────────────────── */}
+      <footer className="border-t border-white/10 mt-10 py-6 text-center">
+        <p className="text-xs text-cream/25">🏛️ TanyaPeguam · Digital Card</p>
+      </footer>
 
-      {/* Donna Widget — floating intake chat */}
-      <DonnaWidget slug={params.slug} />
     </div>
   );
 }
