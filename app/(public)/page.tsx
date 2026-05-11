@@ -2,6 +2,7 @@ import { auth } from '@/auth';
 import { redirect } from 'next/navigation';
 import Image from 'next/image';
 import Link from 'next/link';
+import { db } from '@/lib/db';
 
 const PRACTICE_AREAS = [
   'Isu hartanah / konveyan',
@@ -15,6 +16,11 @@ const PRACTICE_AREAS = [
 export default async function Home() {
   const session = await auth();
   if (session?.user) redirect('/profile');
+
+  // Fetch count of active lawyer profiles
+  const lawyerCount = await db.lawyerProfile.count({
+    where: { status: 'ACTIVE' },
+  });
 
   return (
     <div className="min-h-screen text-cream" style={{
@@ -83,7 +89,7 @@ export default async function Home() {
           {/* Stats Row */}
           <div className="flex items-center gap-10 mb-6">
             <div>
-              <p className="text-3xl font-bold text-gold-400">3</p>
+              <p className="text-3xl font-bold text-gold-400">{lawyerCount}</p>
               <p className="text-xs text-cream/35 mt-1">Peguam Disahkan</p>
             </div>
             <div className="w-px h-10 bg-white/8" />
