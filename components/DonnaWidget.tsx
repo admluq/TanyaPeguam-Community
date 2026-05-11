@@ -171,8 +171,8 @@ export default function DonnaWidget({
           </div>
         </div>
 
-        {/* Notification banner — only shown at start (step === 'name') */}
-        {step === 'name' && (
+        {/* Notification banner — shown during contact collection steps */}
+        {['name', 'phone', 'email_opt'].includes(step) && (
           <div className="mb-4 p-3 bg-purple-950/50 border border-purple-500/30 rounded-lg">
             <p className="text-sm text-cream/80 leading-relaxed">
               Untuk membantu peguam menilai kes anda dengan lebih lanjut, sila lengkapkan maklumat ringkas melalui Donna.

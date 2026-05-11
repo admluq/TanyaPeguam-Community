@@ -3,66 +3,133 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createInquiry } from '@/lib/inquiry';
 import { completeBridgeOnIntake } from '@/lib/bridge';
 
-// Generate 3 context-aware compound questions based on the legal issue (soalan asal)
-function generateContextQuestions(soalanAsal: string): string {
-  const lower = soalanAsal.toLowerCase();
+// ── Q1: Context-aware probing questions about the problem ─────────────
+function generateProbingQuestions(issue: string): string {
+  const lower = issue.toLowerCase();
 
-  // Detect issue type from keywords
-  const isTermination = /buang|pecat|resign|terminate|kerjasama|tamat/.test(lower);
-  const isContract = /kontrak|perjanjian|deal|agreement/.test(lower);
-  const isProperty = /hartanah|tanah|rumah|bangunan|property/.test(lower);
-  const isFamily = /perkahwinan|cerai|anak|warisan|keluarga/.test(lower);
+  const isTermination = /buang|pecat|resign|terminate|kerjasama|tamat|gaji|majikan|kerja/.test(lower);
+  const isContract    = /kontrak|perjanjian|deal|agreement|bayar|hutang/.test(lower);
+  const isProperty    = /hartanah|tanah|rumah|bangunan|property|developer|pemaju|konveyan/.test(lower);
+  const isFamily      = /perkahwinan|cerai|anak|warisan|keluarga|pusaka|nafkah/.test(lower);
 
-  let q1, q2, q3;
+  if (isTermination) return [
+    `To help the lawyer assess your employment matter, please answer the following:`,
+    ``,
+    `1. When were you terminated and how was it communicated — verbally or in writing? Who informed you?`,
+    `2. How long were you employed and in what position? Did you have a contract or Letter of Offer?`,
+    `3. What reason (if any) did your employer give for the termination?`,
+  ].join('\n');
+
+  if (isContract) return [
+    `To help the lawyer assess your contract dispute, please answer:`,
+    ``,
+    `1. What was originally agreed upon and who are the other parties involved? Was it written or verbal?`,
+    `2. When did this arrangement begin and what has been done/paid so far?`,
+    `3. What specific breach or issue has occurred and when did it start?`,
+  ].join('\n');
+
+  if (isProperty) return [
+    `To help the lawyer assess your property matter, please answer:`,
+    ``,
+    `1. What type of property is involved and what is the issue — purchase, ownership, tenancy, or dispute?`,
+    `2. Who are the other parties involved (developer, seller, bank, tenant)?`,
+    `3. Have any payments been made? What is the current status of the property?`,
+  ].join('\n');
+
+  if (isFamily) return [
+    `To help the lawyer understand your family matter, please answer:`,
+    ``,
+    `1. What is your relationship to the other party and what outcome are you seeking?`,
+    `2. Are there children or shared assets involved?`,
+    `3. Have there been any prior agreements or court orders related to this matter?`,
+  ].join('\n');
+
+  return [
+    `To help the lawyer assess your case, please answer:`,
+    ``,
+    `1. When did this situation begin and who are the parties involved?`,
+    `2. What actions or decisions have been taken so far?`,
+    `3. What outcome are you hoping to achieve?`,
+  ].join('\n');
+}
+
+// ── Q2: Context-aware document recommendations ────────────────────────
+function generateDocumentRecommendations(issue: string): string {
+  const lower = issue.toLowerCase();
+
+  const isTermination = /buang|pecat|resign|terminate|kerjasama|tamat|gaji|majikan|kerja/.test(lower);
+  const isContract    = /kontrak|perjanjian|deal|agreement|bayar|hutang/.test(lower);
+  const isProperty    = /hartanah|tanah|rumah|bangunan|property|developer|pemaju|konveyan/.test(lower);
+  const isFamily      = /perkahwinan|cerai|anak|warisan|keluarga|pusaka|nafkah/.test(lower);
+
+  let docs: string;
 
   if (isTermination) {
-    q1 = `1. Bilakah anda diputuskan hubungan kerja dan dalam keadaan apa (lisan/tertulis)? Siapa yang memberitahu?`;
-    q2 = `2. Berapa lama anda bekerja dan dalam jawatan apa? Ada kontrak atau LoO (Letter of Offer)?`;
-    q3 = `3. Ada saksi atau dokumen sokongan (email, slip gaji terakhir, surat tamat perkhidmatan)?`;
+    docs = [
+      `• Employment contract / Letter of Offer`,
+      `• Termination letter or show-cause letter`,
+      `• Last 3 months' payslips`,
+      `• Any related emails or written warnings`,
+      `• Attendance or performance records`,
+    ].join('\n');
   } else if (isContract) {
-    q1 = `1. Apa yang disepakati awalnya dan siapa pihak lain yang terlibat? Ada tertulis atau lisan sahaja?`;
-    q2 = `2. Bila dimulai dan apa yang telah dilakukan sejauh ini?`;
-    q3 = `3. Apa masalah atau percanggahan yang timbul? Ada bukti tertulis?`;
+    docs = [
+      `• Original contract or agreement`,
+      `• Any amendments or addendums`,
+      `• Proof of payment or transactions`,
+      `• Related correspondence (emails, letters)`,
+      `• Invoices or receipts`,
+    ].join('\n');
   } else if (isProperty) {
-    q1 = `1. Jenis hartanah apa dan di mana lokasinya? Anda pemilik atau pembeli?`;
-    q2 = `2. Apa masalah yang timbul? Melibatkan pihak lain atau institusi (bank, majlis)?`;
-    q3 = `3. Ada dokumen pemilikan, perjanjian jual beli, atau surat rasmi lain?`;
+    docs = [
+      `• Sale & Purchase Agreement (SPA)`,
+      `• Land title or ownership document`,
+      `• Payment receipts (deposit, instalments)`,
+      `• Correspondence with developer/seller/bank`,
+      `• Bank loan statement (if applicable)`,
+    ].join('\n');
   } else if (isFamily) {
-    q1 = `1. Apa hubungan anda dengan pihak lain dan apa yang anda inginkan dicapai?`;
-    q2 = `2. Ada perjanjian sebelumnya atau isu yang ingin diselesaikan?`;
-    q3 = `3. Ada dokumen penting atau saksi yang boleh menyokong?`;
+    docs = [
+      `• Marriage certificate`,
+      `• Children's birth certificates (if relevant)`,
+      `• Any existing court orders or agreements`,
+      `• Joint asset documents (property, bank accounts)`,
+      `• Will or inheritance documents (if relevant)`,
+    ].join('\n');
   } else {
-    // Generic fallback for other issues
-    q1 = `1. Bilakah peristiwa ini berlaku dan siapa yang terlibat secara langsung?`;
-    q2 = `2. Apa tindakan atau keputusan yang dibuat dan berdasarkan apa?`;
-    q3 = `3. Ada dokumen, email, bukti atau saksi yang menyokong kes anda?`;
+    docs = [
+      `• Any contract or agreement related to the matter`,
+      `• Proof of payment or transactions`,
+      `• Related correspondence (emails, messages, letters)`,
+      `• Identity document (MyKad)`,
+      `• Any other relevant evidence or records`,
+    ].join('\n');
   }
 
-  return `Untuk membantu peguam menilai kes anda dengan lebih lanjut, sila jawab ketiga-tiga soalan berikut:\n\n${q1}\n${q2}\n${q3}`;
+  return [
+    `Based on your case, we recommend gathering the following documents before your consultation with the lawyer:`,
+    ``,
+    docs,
+    ``,
+    `Please locate and prepare these — having them ready will significantly speed up the lawyer's assessment of your case. Type "ok" or let us know if you have any questions about the documents.`,
+  ].join('\n');
 }
 
 /**
- * POST /api/donna-chat   ⚠️ DEPRECATED — see plan §A "API Sequence Diagram".
- * This stateless state-machine handler will be replaced by /api/chat/donna
- * (LLM-backed Agent A/B/C orchestrator) in Phase 3. Kept alive in the
- * meantime so the existing widget keeps working, but it now:
- *   1. accepts an optional bridgeId param (audit SPOF #14 fix), and
- *   2. calls lib/inquiry.createInquiry() directly instead of fetching
- *      its own /api/admin/donna-inquiry endpoint (audit SPOF #10/#11 fix).
+ * POST /api/donna-chat
  *
- * Body:
- *   slug        string  — lawyer's profile slug
- *   step        string  — current state: 'start'|'name'|'phone'|'area'|'issue'|'email'|'done'
- *   userInput   string? — what the user just said
- *   collected   object  — session state carried from client
- *   bridgeId    string? — optional bridge session this chat originated from
+ * New intake flow (applies to both bridge and digital card):
+ *   start → name → phone → email_opt → q1 → q2 → q3 → q4 → q5 → done
  *
- * Returns:
- *   message     string  — Donna's next reply
- *   nextStep    string  — state machine transition
- *   collected   object  — updated session state
- *   done        boolean — true when intake is complete
- *   inquiryId   string? — set when done=true
+ *   start     : Initial greeting, transitions to 'name'
+ *   name      : Collect full name
+ *   phone     : Collect phone number
+ *   email_opt : Collect email (optional, "skip" allowed)
+ *   q1        : Context-aware probing — detail of problem
+ *   q2        : Document recommendations based on context
+ *   q3        : Share docs to lawyer email + case ref + consultation preference
+ *   q4        : Emergency / sooner appointment option
+ *   q5        : Final remarks — wrap up and submit
  */
 export async function POST(req: NextRequest) {
   try {
@@ -73,19 +140,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'slug required' }, { status: 400 });
     }
 
-    // Load profile + donna config (keep secure fields, only load what's needed for convo)
+    // ── Load profile (include lawyer email for Q3) ──────────────
     const profile = await db.lawyerProfile.findUnique({
       where: { slug },
       select: {
         id: true,
         firmName: true,
         donnaConfig: {
-          select: {
-            personality: true,
-            kbContext: true,
-            triageRules: true,
-          },
+          select: { personality: true, kbContext: true, triageRules: true },
         },
+        legalServiceConfig: {
+          select: { emelPertanyaan: true },
+        },
+        user: { select: { email: true } },
       },
     });
 
@@ -93,267 +160,208 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Profile not found' }, { status: 404 });
     }
 
-    const personality = profile.donnaConfig?.personality ?? 'PROFESSIONAL';
-    const firmName = profile.firmName ?? 'firma guaman ini';
-    // True when client came via a bridge link — issue already known from initialQuestion
-    const hasBridgeContext = !!bridgeQuestion || !!collected?._hasBridgeContext;
-    // Custom greeting for digital card
-    const hasCustomGreeting = !!initialGreeting;
+    const firmName    = profile.firmName ?? 'firma guaman ini';
+    const lawyerEmail = (profile.legalServiceConfig as any)?.emelPertanyaan
+      || profile.user?.email
+      || null;
 
-    // ── Personality tone ──────────────────────────────────────
-    const tone = {
-      PROFESSIONAL: {
-        greeting: `Assalamualaikum dan selamat datang ke ${firmName}. Saya Donna, pembantu digital firma ini.`,
-        thanks: 'Terima kasih kerana menghubungi kami.',
-        prompt_name: 'Boleh saya dapatkan nama penuh anda?',
-        prompt_phone: 'Terima kasih. Apakah nombor telefon anda untuk kami hubungi?',
-        prompt_area: 'Apakah jenis isu undang-undang yang anda hadapi? Contohnya: perkahwinan, hartanah, jenayah, perniagaan, atau lain-lain.',
-        prompt_issue: 'Sila terangkan secara ringkas isu anda. Semakin terperinci, semakin baik kami dapat membantu.',
-        prompt_email: 'Apakah alamat e-mel anda? (Pilihan — anda boleh taip "skip" jika tidak mahu berkongsi)',
-        closing: 'Pertanyaan anda telah direkodkan dan akan dikaji oleh peguam kami. Kami akan menghubungi anda tidak lama lagi. Terima kasih atas kepercayaan anda.',
-      },
-      SOFT: {
-        greeting: `Hai! Selamat datang ke ${firmName} 😊 Saya Donna, saya di sini untuk bantu anda.`,
-        thanks: 'Terima kasih ya!',
-        prompt_name: 'Boleh tahu nama anda?',
-        prompt_phone: 'Best! Boleh bagi nombor telefon anda? Kami akan hubungi anda nanti.',
-        prompt_area: 'Okay, boleh cerita sikit isu apa yang anda hadapi? Perniagaan, keluarga, hartanah, atau apa-apa lain?',
-        prompt_issue: 'Ceritakan lebih lanjut ya. Apa yang berlaku?',
-        prompt_email: 'Nak bagi e-mel? (Tak wajib, taip "skip" kalau tak mahu)',
-        closing: 'Okay! Maklumat anda dah disimpan dan peguam kami akan tengok segera. Nantikan panggilan dari kami ya! 😊',
-      },
-      STRICT: {
-        greeting: `Selamat datang ke ${firmName}. Saya Donna, sistem pengambilan pertanyaan.`,
-        thanks: 'Diterima.',
-        prompt_name: 'Nama penuh anda?',
-        prompt_phone: 'Nombor telefon anda?',
-        prompt_area: 'Nyatakan bidang undang-undang: jenayah / sivil / syariah / hartanah / perniagaan / keluarga / lain-lain.',
-        prompt_issue: 'Huraikan isu anda secara ringkas dan tepat.',
-        prompt_email: 'E-mel anda? (Taip "skip" jika tidak berkenaan)',
-        closing: 'Pertanyaan anda telah direkodkan. Peguam akan menghubungi anda.',
-      },
-    }[personality];
+    // Case reference: use bridge shortCode if available, else last 8 chars of bridgeId
+    let caseRef = bridgeId ? bridgeId.slice(-8).toUpperCase() : null;
+    if (bridgeId) {
+      try {
+        const bridge = await db.donnaBridge.findUnique({
+          where: { id: bridgeId },
+          select: { shortCode: true },
+        });
+        if (bridge?.shortCode) caseRef = bridge.shortCode;
+      } catch { /* non-fatal */ }
+    }
 
-    // ── State machine ────────────────────────────────────────
-    let message = '';
-    let nextStep = step;
+    // ── State machine ────────────────────────────────────────────
+    let message    = '';
+    let nextStep   = step;
     let updatedCollected = { ...collected };
-    let done = false;
+    let done       = false;
     let inquiryId: string | undefined;
 
     switch (step) {
+
+      // ── INITIAL GREETING ──────────────────────────────────────
       case 'start': {
-        if (hasCustomGreeting) {
-          // Digital card mode: use custom greeting
+        if (initialGreeting) {
           message = initialGreeting;
-        } else if (hasBridgeContext && bridgeQuestion) {
-          // Bridge mode: greet with the specific issue already known
+        } else if (bridgeQuestion) {
           const shortIssue = bridgeQuestion.length > 120
             ? bridgeQuestion.slice(0, 117) + '...'
             : bridgeQuestion;
-          message = `${tone.greeting}\n\nSaya faham anda ada pertanyaan mengenai:\n\n"${shortIssue}"\n\nUntuk membantu peguam kami menilai kes anda dengan lebih lanjut, boleh saya dapatkan nama penuh anda?`;
+          message = `Assalamualaikum dan selamat datang ke ${firmName}. Saya Donna, pembantu digital firma ini.\n\nSaya faham anda ada pertanyaan mengenai:\n\n"${shortIssue}"\n\nUntuk membantu peguam kami menilai kes anda, boleh saya dapatkan nama penuh anda?`;
         } else {
-          message = `${tone.greeting}\n\n${tone.prompt_name}`;
+          message = `Assalamualaikum dan selamat datang ke ${firmName}. Saya Donna, pembantu digital firma ini.\n\nBoleh saya dapatkan nama penuh anda?`;
         }
         nextStep = 'name';
         break;
       }
 
+      // ── STEP 1: NAME ──────────────────────────────────────────
       case 'name': {
         const name = (userInput ?? '').trim();
         if (!name || name.length < 2) {
-          message = 'Sila masukkan nama penuh anda.';
+          message = 'Please provide your full name.';
           nextStep = 'name';
           break;
         }
         updatedCollected.clientName = name;
-        if (hasCustomGreeting || hasBridgeContext) {
-          // Bridge / digital card mode: 4-question flow
-          message = `${tone.thanks}\n\nUntuk peguam bagi maklum balas, boleh kami dapatkan nombor untuk hubungi anda?`;
-          nextStep = 'q1';
-        } else {
-          message = `${tone.thanks}\n\n${tone.prompt_phone}`;
-          nextStep = 'phone';
-        }
+        message = `Thank you, ${name}! To ensure the lawyer can follow up with you, may I have your phone number?`;
+        nextStep = 'phone';
         break;
       }
 
+      // ── STEP 2: PHONE ─────────────────────────────────────────
       case 'phone': {
         const phone = (userInput ?? '').replace(/\s/g, '');
         if (!/^(\+?60|0)\d{8,10}$/.test(phone)) {
-          message = 'Sila masukkan nombor telefon Malaysia yang sah. Contoh: 0123456789';
+          message = 'Please enter a valid Malaysian phone number. Example: 0123456789';
           nextStep = 'phone';
           break;
         }
         updatedCollected.clientPhone = phone;
-        if (hasBridgeContext) {
-          // Issue already known from bridge — skip area + issue, go straight to email
-          message = `${tone.thanks}\n\n${tone.prompt_email}`;
-          nextStep = 'email';
-        } else {
-          message = `${tone.thanks}\n\n${tone.prompt_area}`;
-          nextStep = 'area';
-        }
+        message = `Got it! Could we also have your email address? (Type "skip" if you'd prefer not to share)`;
+        nextStep = 'email_opt';
         break;
       }
 
-      case 'area': {
-        const area = (userInput ?? '').trim();
-        if (!area || area.length < 2) {
-          message = 'Sila nyatakan jenis isu undang-undang anda.';
-          nextStep = 'area';
-          break;
-        }
-        updatedCollected.practiceArea = area;
-        message = `${tone.thanks}\n\n${tone.prompt_issue}`;
-        nextStep = 'issue';
-        break;
-      }
-
-      case 'issue': {
-        const issue = (userInput ?? '').trim();
-        if (!issue || issue.length < 10) {
-          message = 'Sila berikan lebih maklumat mengenai isu anda (sekurang-kurangnya 10 aksara).';
-          nextStep = 'issue';
-          break;
-        }
-        updatedCollected.issueSummary = issue;
-        message = `${tone.thanks}\n\n${tone.prompt_email}`;
-        nextStep = 'email';
-        break;
-      }
-
-      case 'email': {
+      // ── STEP 3: EMAIL (OPTIONAL) ──────────────────────────────
+      case 'email_opt': {
         const emailInput = (userInput ?? '').trim().toLowerCase();
-        const skip = emailInput === 'skip' || emailInput === '';
+        const skip       = emailInput === 'skip' || emailInput === '';
         const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput);
 
         if (!skip && !validEmail) {
-          message = 'Sila masukkan e-mel yang sah, atau taip "skip" untuk langkau.';
-          nextStep = 'email';
+          message = 'Please enter a valid email address, or type "skip" to proceed.';
+          nextStep = 'email_opt';
           break;
         }
 
         updatedCollected.clientEmail = skip ? null : emailInput;
 
-        // ── Step 1: Create inquiry (non-fatal) ──────────────────────────
-        const finalIssueSummaryEmail =
-          updatedCollected.issueSummary ?? bridgeQuestion ?? 'Pertanyaan dari bridge';
-
-        try {
-          const result = await createInquiry({
-            profileId: profile.id,
-            clientName: updatedCollected.clientName,
-            clientEmail: updatedCollected.clientEmail,
-            clientPhone: updatedCollected.clientPhone,
-            practiceArea: updatedCollected.practiceArea ?? null,
-            issueSummary: finalIssueSummaryEmail,
-            transcript: JSON.stringify(updatedCollected._transcript ?? []),
-            bridgeId: bridgeId ?? null,
-          });
-          inquiryId = result.inquiryId;
-        } catch (submitErr) {
-          console.error('[donna-chat email] createInquiry error:', submitErr);
-        }
-
-        // ── Step 2: Mark bridge COMPLETED — always runs, independent of Step 1 ──
-        if (bridgeId) {
-          try {
-            await completeBridgeOnIntake(bridgeId, {
-              clientName:   updatedCollected.clientName   ?? null,
-              clientEmail:  updatedCollected.clientEmail  ?? null,
-              clientPhone:  updatedCollected.clientPhone  ?? null,
-              practiceArea: updatedCollected.practiceArea ?? null,
-            });
-            console.log('[donna-chat email] bridge', bridgeId, 'marked COMPLETED');
-          } catch (bridgeErr) {
-            console.error('[donna-chat email] completeBridgeOnIntake error:', bridgeErr);
-          }
-        }
-
-        message = tone.closing;
-        nextStep = 'done';
-        done = true;
+        // Issue context: from bridgeQuestion (bridge) or collected (digital card)
+        const issueContext = bridgeQuestion ?? updatedCollected.issueSummary ?? '';
+        message = generateProbingQuestions(issueContext);
+        nextStep = 'q1';
         break;
       }
 
-      // Digital card 4-question flow
+      // ── Q1: USER ANSWERS PROBING QUESTIONS ───────────────────
       case 'q1': {
-        const phone = (userInput ?? '').replace(/\s/g, '');
-        if (!/^(\+?60|0)\d{8,10}$/.test(phone)) {
-          message = 'Sila masukkan nombor telefon Malaysia yang sah. Contoh: 0123456789';
+        const answer = (userInput ?? '').trim();
+        if (!answer || answer.length < 10) {
+          message = 'Please provide more detail to help the lawyer assess your case. Try to answer all questions above.';
           nextStep = 'q1';
           break;
         }
-        updatedCollected.clientPhone = phone;
-        // Generate context-aware compound questions based on soalan asal
-        const soalanAsal = bridgeQuestion ?? 'isu undang-undang anda';
-        const contextQuestions = generateContextQuestions(soalanAsal);
-        message = `${tone.thanks}\n\n${contextQuestions}`;
+        updatedCollected.issueSummary = answer;
+
+        // Generate document recommendations based on issue context
+        const issueForDocs = bridgeQuestion ?? answer;
+        message = generateDocumentRecommendations(issueForDocs);
         nextStep = 'q2';
         break;
       }
 
+      // ── Q2: USER ACKNOWLEDGES DOCUMENTS ──────────────────────
       case 'q2': {
-        const factResponse = (userInput ?? '').trim();
-        if (!factResponse || factResponse.length < 10) {
-          message = 'Sila berikan lebih maklumat. Jawab ketiga-tiga soalan di atas untuk membantu peguam menilai kes anda.';
-          nextStep = 'q2';
-          break;
-        }
-        updatedCollected.issueSummary = factResponse;
-        message = `${tone.thanks}\n\nBila sebaik-baiknya kami boleh menghubungi anda? (Contoh: hari ini, minggu depan, atau sila nyatakan tarikh)`;
+        // Any response is valid — user is acknowledging the doc list
+        updatedCollected.docsAcknowledged = true;
+
+        const emailLine = lawyerEmail
+          ? `📧 **${lawyerEmail}**`
+          : `📧 *(please contact the lawyer directly)*`;
+
+        const refLine = caseRef
+          ? `Please include **Case Reference: ${caseRef}** in your email subject.`
+          : ``;
+
+        message = [
+          `When you have gathered your documents, you may send them directly to the lawyer at:`,
+          ``,
+          emailLine,
+          refLine,
+          ``,
+          `This will help the lawyer review your case before your consultation.`,
+          ``,
+          `Now, when are you available to consult? And what is your preferred mode:`,
+          `• 📞 Phone call`,
+          `• 💻 Video meeting`,
+          `• 🏢 In-person appointment`,
+        ].filter(l => l !== undefined).join('\n');
         nextStep = 'q3';
         break;
       }
 
+      // ── Q3: CONSULTATION PREFERENCE & AVAILABILITY ───────────
       case 'q3': {
-        const availability = (userInput ?? '').trim();
-        if (!availability || availability.length < 2) {
-          message = 'Sila nyatakan masa yang sesuai.';
+        const preference = (userInput ?? '').trim();
+        if (!preference || preference.length < 2) {
+          message = 'Please let us know your availability and preferred consultation mode.';
           nextStep = 'q3';
           break;
         }
-        updatedCollected.availability = availability;
-        message = `${tone.thanks}\n\nBoleh saya dapatkan alamat e-mel anda untuk rekod? (Pilihan — taip "skip" jika tidak mahu)`;
+        updatedCollected.consultationPreference = preference;
+
+        message = [
+          `Understood. One more thing — do you need this handled urgently?`,
+          ``,
+          `We can arrange an appointment as soon as possible, however a **small emergency fee** may apply.`,
+          ``,
+          `• Yes — I need this as soon as possible`,
+          `• No — standard timeline is fine`,
+        ].join('\n');
         nextStep = 'q4';
         break;
       }
 
+      // ── Q4: EMERGENCY / URGENCY OPTION ───────────────────────
       case 'q4': {
-        const emailInput = (userInput ?? '').trim().toLowerCase();
-        const skip = emailInput === 'skip' || emailInput === '';
-        const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput);
+        const urgency = (userInput ?? '').trim();
+        updatedCollected.urgencyPreference = urgency;
 
-        if (!skip && !validEmail) {
-          message = 'Sila masukkan e-mel yang sah, atau taip "skip" untuk langkau.';
-          nextStep = 'q4';
-          break;
-        }
+        message = [
+          `Thank you for sharing all of this.`,
+          ``,
+          `Is there anything else you'd like the lawyer to know, or are you satisfied with what has been shared? Feel free to leave any additional remarks or questions below.`,
+          ``,
+          `*(Type "none" if you have nothing to add)*`,
+        ].join('\n');
+        nextStep = 'q5';
+        break;
+      }
 
-        updatedCollected.clientEmail = skip ? null : emailInput;
+      // ── Q5: FINAL REMARKS → SUBMIT ────────────────────────────
+      case 'q5': {
+        const remarks = (userInput ?? '').trim();
+        updatedCollected.remarks = remarks !== 'none' ? remarks : null;
 
         const finalIssueSummary =
-          updatedCollected.issueSummary ?? bridgeQuestion ?? 'Pertanyaan dari digital card';
+          updatedCollected.issueSummary ?? bridgeQuestion ?? 'Inquiry submitted via Donna';
 
-        // ── Step 1: Create inquiry (non-fatal if duplicate bridgeId) ──
+        // ── Step 1: Create inquiry (non-fatal) ──
         try {
           const result = await createInquiry({
-            profileId: profile.id,
-            clientName: updatedCollected.clientName,
-            clientEmail: updatedCollected.clientEmail,
-            clientPhone: updatedCollected.clientPhone,
+            profileId:    profile.id,
+            clientName:   updatedCollected.clientName,
+            clientEmail:  updatedCollected.clientEmail,
+            clientPhone:  updatedCollected.clientPhone,
             practiceArea: null,
             issueSummary: finalIssueSummary,
-            transcript: JSON.stringify(updatedCollected._transcript ?? []),
-            bridgeId: bridgeId ?? null,
+            transcript:   JSON.stringify(updatedCollected._transcript ?? []),
+            bridgeId:     bridgeId ?? null,
           });
           inquiryId = result.inquiryId;
         } catch (submitErr) {
-          console.error('[donna-chat q4] createInquiry error:', submitErr);
+          console.error('[donna-chat q5] createInquiry error:', submitErr);
         }
 
-        // ── Step 2: Mark bridge COMPLETED — always runs, independent of Step 1 ──
+        // ── Step 2: Mark bridge COMPLETED — independent of Step 1 ──
         if (bridgeId) {
           try {
             await completeBridgeOnIntake(bridgeId, {
@@ -362,51 +370,36 @@ export async function POST(req: NextRequest) {
               clientPhone:  updatedCollected.clientPhone  ?? null,
               practiceArea: null,
             });
-            console.log('[donna-chat q4] bridge', bridgeId, 'marked COMPLETED');
+            console.log('[donna-chat q5] bridge', bridgeId, 'marked COMPLETED');
           } catch (bridgeErr) {
-            console.error('[donna-chat q4] completeBridgeOnIntake error:', bridgeErr);
+            console.error('[donna-chat q5] completeBridgeOnIntake error:', bridgeErr);
           }
-        } else {
-          console.warn('[donna-chat q4] no bridgeId — bridge status NOT updated');
         }
 
-        // Summarize
-        const summary = [
-          `Terima kasih, ${updatedCollected.clientName}. Maklumat anda telah direkodkan.`,
+        message = [
+          `Thank you, ${updatedCollected.clientName ?? 'there'}! Your enquiry has been recorded.`,
           ``,
-          `Ringkasan:`,
-          `• Isu: ${updatedCollected.issueSummary ?? bridgeQuestion ?? '-'}`,
-          `• Telefon: ${updatedCollected.clientPhone ?? '-'}`,
-          `• Masa sesuai: ${updatedCollected.availability ?? '-'}`,
-          updatedCollected.clientEmail ? `• E-mel: ${updatedCollected.clientEmail}` : null,
+          `The lawyer will review your case and get back to you within **5 working days**.`,
           ``,
-          `Peguam akan beri maklum balas dalam 5 hari bekerja.`,
-        ].filter((l) => l !== null).join('\n');
-        message = summary;
+          `In the meantime, please gather the documents we mentioned and send them to the lawyer's email with your case reference${caseRef ? ` **(${caseRef})**` : ''}.`,
+        ].join('\n');
+
         nextStep = 'done';
         done = true;
         break;
       }
 
       default: {
-        message = 'Sesi ini telah tamat. Terima kasih!';
+        message  = 'This session has ended. Thank you!';
         nextStep = 'done';
-        done = true;
+        done     = true;
       }
     }
 
-    return NextResponse.json({
-      message,
-      nextStep,
-      collected: updatedCollected,
-      done,
-      inquiryId,
-    });
+    return NextResponse.json({ message, nextStep, collected: updatedCollected, done, inquiryId });
+
   } catch (error) {
     console.error('donna-chat error:', error);
-    return NextResponse.json(
-      { error: 'Failed to process message' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to process message' }, { status: 500 });
   }
 }
