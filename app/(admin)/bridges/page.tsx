@@ -378,7 +378,7 @@ function BridgeRow({
 
           {/* URL */}
           <div>
-            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Pautan Awam</p>
+            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Public Bridge Link</p>
             {canShare ? (
               <code className="text-xs font-mono text-green-400 break-all bg-ink-500/40 block px-2 py-1.5 rounded">{url}</code>
             ) : (
