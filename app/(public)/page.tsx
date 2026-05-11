@@ -65,9 +65,7 @@ export default async function Home() {
           <h1 className="text-5xl lg:text-6xl font-display font-bold text-cream leading-tight mb-6">
             Penyelesaian Digital
             <br />
-            Untuk Peguam
-            <br />
-            <span className="italic text-gold-400">Profesional</span>
+            <span className="text-gold-400">Untuk Peguam Profesional</span>
           </h1>
 
           {/* Subtitle */}
