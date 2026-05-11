@@ -107,7 +107,7 @@ function BridgeCreator({ onCreated }: { onCreated: () => void }) {
       {!result ? (
         <div className="space-y-3">
           <div>
-            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Customer Question (from Facebook)</label>
+            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Lead Question</label>
             <textarea value={question} onChange={e => { setQuestion(e.target.value); setError(''); }}
               placeholder="E.g. Developer fled with my house money. Paid 200k but house not ready."
               className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 resize-none" rows={2} />
