@@ -18,18 +18,26 @@ export default async function BridgeIntakePage({ params }: PageProps) {
 
   const lawyerName = (bridge.profile as any).username || bridge.profile.user.name || 'Peguam';
   const position   = (bridge.profile as any).position as string | null | undefined;
-  const firmName   = bridge.profile.firmName;
+  const firmName   = bridge.profile.firmName ?? 'firma guaman ini';
+
+  function shortSummary(text: string | null | undefined): string {
+    if (!text) return '';
+    const words = text.trim().split(/\s+/);
+    if (words.length <= 8) return text.trim();
+    return words.slice(0, 8).join(' ') + '...';
+  }
 
   // Build the greeting shown inside Donna on start
   const initialGreeting = [
-    `Assalamualaikum dan selamat datang, saya Donna, pembantu digital peguam ${lawyerName}.`,
-    bridge.initialAnswer
-      ? `Peguam ada maklum yang:\n\n"${bridge.initialAnswer}"`
+    `Hi, Selamat Datang!`,
+    `Saya Donna, pembantu digital Peguam ${lawyerName} bagi Firma ${firmName}.`,
+    bridge.initialQuestion
+      ? `\nTadi awak ada ajukan soalan di Facebook TanyaPeguam berkaitan '${shortSummary(bridge.initialQuestion)}'.`
       : null,
-    `Untuk membantu peguam kami menilai kes anda dengan lebih lanjut, boleh saya dapatkan nama penuh anda?`,
+    `\nUntuk membantu peguam menilai kes awak dengan lebih lanjut, boleh saya dapatkan nama penuh dan nombor telefon awak?`,
   ]
     .filter(Boolean)
-    .join('\n\n');
+    .join('\n');
 
   return (
     <div className="min-h-screen bg-black text-cream">

@@ -36,7 +36,7 @@ export default function DonnaWidget({
   const [open, setOpen] = useState(autoOpen || embedded);
   // If messages are pre-populated, skip 'start' → go straight to 'name'
   const [messages, setMessages] = useState<Message[]>(initialMessages ?? []);
-  const [step, setStep] = useState(hasPreload ? 'name' : 'start');
+  const [step, setStep] = useState(hasPreload ? 'name_phone' : 'start');
   const [input, setInput] = useState('');
   const [collected, setCollected] = useState<Record<string, any>>({
     _transcript: [],

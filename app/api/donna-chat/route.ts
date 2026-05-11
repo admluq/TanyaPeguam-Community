@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createInquiry } from '@/lib/inquiry';
 import { completeBridgeOnIntake } from '@/lib/bridge';
 
-// ── Q1: Context-aware probing questions about the problem ─────────────
+// ── Q1: Context-aware probing questions about the problem (Malay) ─────
 function generateProbingQuestions(issue: string): string {
   const lower = issue.toLowerCase();
 
@@ -12,49 +12,51 @@ function generateProbingQuestions(issue: string): string {
   const isProperty    = /hartanah|tanah|rumah|bangunan|property|developer|pemaju|konveyan/.test(lower);
   const isFamily      = /perkahwinan|cerai|anak|warisan|keluarga|pusaka|nafkah/.test(lower);
 
+  const jangan = `\nJangan risau, awak boleh terangkan dalam bahasa inggeris atau bahasa melayu.`;
+
   if (isTermination) return [
-    `To help the lawyer assess your employment matter, please answer the following:`,
+    `Untuk membantu peguam menilai kes pekerjaan awak, sila jawab soalan berikut:`,
     ``,
-    `1. When were you terminated and how was it communicated — verbally or in writing? Who informed you?`,
-    `2. How long were you employed and in what position? Did you have a contract or Letter of Offer?`,
-    `3. What reason (if any) did your employer give for the termination?`,
-  ].join('\n');
+    `1. Bila awak ditamatkan dan bagaimana ia dimaklumkan — secara lisan atau bertulis? Siapa yang memaklumkan awak?`,
+    `2. Berapa lama awak bekerja dan dalam jawatan apa? Adakah awak ada kontrak atau Surat Tawaran?`,
+    `3. Apakah sebab (jika ada) yang majikan berikan untuk penamatan tersebut?`,
+  ].join('\n') + jangan;
 
   if (isContract) return [
-    `To help the lawyer assess your contract dispute, please answer:`,
+    `Untuk membantu peguam menilai pertikaian kontrak awak, sila jawab:`,
     ``,
-    `1. What was originally agreed upon and who are the other parties involved? Was it written or verbal?`,
-    `2. When did this arrangement begin and what has been done/paid so far?`,
-    `3. What specific breach or issue has occurred and when did it start?`,
-  ].join('\n');
+    `1. Apakah yang telah dipersetujui dan siapa pihak-pihak yang terlibat? Adakah ia bertulis atau lisan?`,
+    `2. Bila peraturan ini bermula dan apa yang telah dilakukan/dibayar setakat ini?`,
+    `3. Apakah pelanggaran atau isu khusus yang berlaku dan bila ia bermula?`,
+  ].join('\n') + jangan;
 
   if (isProperty) return [
-    `To help the lawyer assess your property matter, please answer:`,
+    `Untuk membantu peguam menilai kes hartanah awak, sila jawab:`,
     ``,
-    `1. What type of property is involved and what is the issue — purchase, ownership, tenancy, or dispute?`,
-    `2. Who are the other parties involved (developer, seller, bank, tenant)?`,
-    `3. Have any payments been made? What is the current status of the property?`,
-  ].join('\n');
+    `1. Apakah jenis hartanah yang terlibat dan apakah isu — pembelian, pemilikan, sewaan, atau pertikaian?`,
+    `2. Siapa pihak-pihak lain yang terlibat (pemaju, penjual, bank, penyewa)?`,
+    `3. Adakah sebarang bayaran telah dibuat? Apakah status semasa hartanah tersebut?`,
+  ].join('\n') + jangan;
 
   if (isFamily) return [
-    `To help the lawyer understand your family matter, please answer:`,
+    `Untuk membantu peguam memahami kes keluarga awak, sila jawab:`,
     ``,
-    `1. What is your relationship to the other party and what outcome are you seeking?`,
-    `2. Are there children or shared assets involved?`,
-    `3. Have there been any prior agreements or court orders related to this matter?`,
-  ].join('\n');
+    `1. Apakah hubungan awak dengan pihak lain dan apakah hasil yang awak cari?`,
+    `2. Adakah kanak-kanak atau aset bersama yang terlibat?`,
+    `3. Adakah sebarang perjanjian atau perintah mahkamah terdahulu berkaitan perkara ini?`,
+  ].join('\n') + jangan;
 
   return [
-    `To help the lawyer assess your case, please answer:`,
+    `Untuk membantu peguam menilai kes awak, sila jawab:`,
     ``,
-    `1. When did this situation begin and who are the parties involved?`,
-    `2. What actions or decisions have been taken so far?`,
-    `3. What outcome are you hoping to achieve?`,
-  ].join('\n');
+    `1. Bila situasi ini bermula dan siapa pihak-pihak yang terlibat?`,
+    `2. Apakah tindakan atau keputusan yang telah diambil setakat ini?`,
+    `3. Apakah hasil yang awak harapkan untuk dicapai?`,
+  ].join('\n') + jangan;
 }
 
 // ── Q2: Context-aware document recommendations ────────────────────────
-function generateDocumentRecommendations(issue: string): string {
+function generateDocumentRecommendations(issue: string, lang: 'ms' | 'en' = 'ms'): string {
   const lower = issue.toLowerCase();
 
   const isTermination = /buang|pecat|resign|terminate|kerjasama|tamat|gaji|majikan|kerja/.test(lower);
@@ -62,47 +64,95 @@ function generateDocumentRecommendations(issue: string): string {
   const isProperty    = /hartanah|tanah|rumah|bangunan|property|developer|pemaju|konveyan/.test(lower);
   const isFamily      = /perkahwinan|cerai|anak|warisan|keluarga|pusaka|nafkah/.test(lower);
 
-  let docs: string;
+  let docsEn: string;
+  let docsMs: string;
 
   if (isTermination) {
-    docs = [
+    docsEn = [
       `• Employment contract / Letter of Offer`,
       `• Termination letter or show-cause letter`,
       `• Last 3 months' payslips`,
       `• Any related emails or written warnings`,
       `• Attendance or performance records`,
     ].join('\n');
+    docsMs = [
+      `• Kontrak pekerjaan atau Surat Tawaran`,
+      `• Surat penamatan atau surat tunjuk sebab`,
+      `• Gaji 3 bulan terakhir`,
+      `• Sebarang emel atau amaran bertulis`,
+      `• Rekod kehadiran atau prestasi kerja`,
+    ].join('\n');
   } else if (isContract) {
-    docs = [
+    docsEn = [
       `• Original contract or agreement`,
       `• Any amendments or addendums`,
       `• Proof of payment or transactions`,
       `• Related correspondence (emails, letters)`,
       `• Invoices or receipts`,
     ].join('\n');
+    docsMs = [
+      `• Kontrak atau perjanjian asal`,
+      `• Pindaan atau lampiran tambahan`,
+      `• Bukti pembayaran atau transaksi`,
+      `• Surat-menyurat berkaitan (emel/surat)`,
+      `• Invois atau resit`,
+    ].join('\n');
   } else if (isProperty) {
-    docs = [
+    docsEn = [
       `• Sale & Purchase Agreement (SPA)`,
       `• Land title or ownership document`,
       `• Payment receipts (deposit, instalments)`,
       `• Correspondence with developer/seller/bank`,
       `• Bank loan statement (if applicable)`,
     ].join('\n');
+    docsMs = [
+      `• Perjanjian Jual Beli (SPA)`,
+      `• Dokumen hak milik atau pemilikan hartanah`,
+      `• Resit pembayaran (deposit, ansuran)`,
+      `• Surat-menyurat dengan pemaju/penjual/bank`,
+      `• Penyata pinjaman bank (jika berkaitan)`,
+    ].join('\n');
   } else if (isFamily) {
-    docs = [
+    docsEn = [
       `• Marriage certificate`,
       `• Children's birth certificates (if relevant)`,
       `• Any existing court orders or agreements`,
       `• Joint asset documents (property, bank accounts)`,
       `• Will or inheritance documents (if relevant)`,
     ].join('\n');
+    docsMs = [
+      `• Sijil nikah`,
+      `• Sijil kelahiran anak-anak (jika berkaitan)`,
+      `• Sebarang perintah mahkamah atau perjanjian`,
+      `• Dokumen aset bersama (hartanah, akaun bank)`,
+      `• Surat wasiat atau dokumen warisan (jika berkaitan)`,
+    ].join('\n');
   } else {
-    docs = [
+    docsEn = [
       `• Any contract or agreement related to the matter`,
       `• Proof of payment or transactions`,
       `• Related correspondence (emails, messages, letters)`,
       `• Identity document (MyKad)`,
       `• Any other relevant evidence or records`,
+    ].join('\n');
+    docsMs = [
+      `• Sebarang kontrak atau perjanjian berkaitan`,
+      `• Bukti pembayaran atau transaksi`,
+      `• Surat-menyurat berkaitan (emel/mesej/surat)`,
+      `• Dokumen pengenalan diri (MyKad)`,
+      `• Sebarang bukti atau rekod lain yang berkaitan`,
+    ].join('\n');
+  }
+
+  const docs = lang === 'ms' ? docsMs : docsEn;
+
+  if (lang === 'ms') {
+    return [
+      `Berdasarkan kes awak, saya mengesyorkan awak mengumpulkan dokumen-dokumen berikut sebelum konsultasi dengan peguam:`,
+      ``,
+      docs,
+      ``,
+      `Sila cari dan sediakan dokumen-dokumen ini — ia akan mempercepatkan penilaian peguam terhadap kes awak. Taip "ok" atau beritahu saya jika ada pertanyaan tentang dokumen-dokumen tersebut.`,
     ].join('\n');
   }
 
@@ -115,21 +165,27 @@ function generateDocumentRecommendations(issue: string): string {
   ].join('\n');
 }
 
+// ── Language detection ────────────────────────────────────────────────
+function detectLanguage(text: string): 'ms' | 'en' {
+  const msWords = /\b(saya|anda|yang|untuk|dengan|tidak|ada|boleh|ini|itu|dan|atau|kepada|dari|dalam|pada|akan|sudah|pernah|juga|lebih|perlu|kami|kita|awak|dia|mereka|sebab|kerana|tetapi|tapi|macam|mana|bila|kalau|jika|dah|lah|kan|la|nak|bagi|oleh)\b/gi;
+  const matches = text.match(msWords);
+  return matches && matches.length >= 2 ? 'ms' : 'en';
+}
+
 /**
  * POST /api/donna-chat
  *
- * New intake flow (applies to both bridge and digital card):
- *   start → name → phone → email_opt → q1 → q2 → q3 → q4 → q5 → done
+ * Intake flow (applies to both bridge and digital card):
+ *   start → name_phone → email_opt → q1 → q2 → q3 → q4 → q5 → done
  *
- *   start     : Initial greeting, transitions to 'name'
- *   name      : Collect full name
- *   phone     : Collect phone number
- *   email_opt : Collect email (optional, "skip" allowed)
- *   q1        : Context-aware probing — detail of problem
- *   q2        : Document recommendations based on context
- *   q3        : Share docs to lawyer email + case ref + consultation preference
- *   q4        : Emergency / sooner appointment option
- *   q5        : Final remarks — wrap up and submit
+ *   start      : Initial greeting, transitions to 'name_phone'
+ *   name_phone : Collect full name + phone in one message
+ *   email_opt  : Collect email (optional, "skip" allowed) — Malay
+ *   q1         : Context-aware probing questions (Malay) — detects reply language
+ *   q2         : Document recommendations (lang-aware)
+ *   q3         : Share docs to lawyer email + case ref + consultation preference (lang-aware)
+ *   q4         : Emergency / sooner appointment option (lang-aware)
+ *   q5         : Final remarks — wrap up and submit (lang-aware)
  */
 export async function POST(req: NextRequest) {
   try {
@@ -152,7 +208,7 @@ export async function POST(req: NextRequest) {
         legalServiceConfig: {
           select: { emelPertanyaan: true },
         },
-        user: { select: { email: true } },
+        user: { select: { email: true, name: true } },
       },
     });
 
@@ -190,42 +246,36 @@ export async function POST(req: NextRequest) {
       case 'start': {
         if (initialGreeting) {
           message = initialGreeting;
-        } else if (bridgeQuestion) {
-          const shortIssue = bridgeQuestion.length > 120
-            ? bridgeQuestion.slice(0, 117) + '...'
-            : bridgeQuestion;
-          message = `Assalamualaikum dan selamat datang ke ${firmName}. Saya Donna, pembantu digital firma ini.\n\nSaya faham anda ada pertanyaan mengenai:\n\n"${shortIssue}"\n\nUntuk membantu peguam kami menilai kes anda, boleh saya dapatkan nama penuh anda?`;
         } else {
-          message = `Assalamualaikum dan selamat datang ke ${firmName}. Saya Donna, pembantu digital firma ini.\n\nBoleh saya dapatkan nama penuh anda?`;
+          const lawyerDisplayName = profile.user?.name ?? null;
+          const nameClause = lawyerDisplayName
+            ? `pembantu digital Peguam ${lawyerDisplayName} bagi Firma ${firmName}`
+            : `pembantu digital ${firmName}`;
+          message = `Hi, Selamat Datang!\nSaya Donna, ${nameClause}.\n\nBoleh saya dapatkan nama penuh dan nombor telefon awak?`;
         }
-        nextStep = 'name';
+        nextStep = 'name_phone';
         break;
       }
 
-      // ── STEP 1: NAME ──────────────────────────────────────────
-      case 'name': {
-        const name = (userInput ?? '').trim();
+      // ── STEP 1: NAME + PHONE (combined) ───────────────────────
+      case 'name_phone': {
+        const raw = (userInput ?? '').trim();
+        const phoneMatch = raw.match(/(\+?60|0)\d{8,10}/);
+        if (!phoneMatch) {
+          message = 'Sila berikan nama penuh dan nombor telefon awak. Contoh: Sharifah Adila 0123456789';
+          nextStep = 'name_phone';
+          break;
+        }
+        const phone = phoneMatch[0];
+        const name  = raw.replace(phone, '').replace(/[,;]/g, '').trim();
         if (!name || name.length < 2) {
-          message = 'Please provide your full name.';
-          nextStep = 'name';
+          message = 'Sila berikan nama penuh dan nombor telefon awak. Contoh: Sharifah Adila 0123456789';
+          nextStep = 'name_phone';
           break;
         }
-        updatedCollected.clientName = name;
-        message = `Thank you, ${name}! To ensure the lawyer can follow up with you, may I have your phone number?`;
-        nextStep = 'phone';
-        break;
-      }
-
-      // ── STEP 2: PHONE ─────────────────────────────────────────
-      case 'phone': {
-        const phone = (userInput ?? '').replace(/\s/g, '');
-        if (!/^(\+?60|0)\d{8,10}$/.test(phone)) {
-          message = 'Please enter a valid Malaysian phone number. Example: 0123456789';
-          nextStep = 'phone';
-          break;
-        }
+        updatedCollected.clientName  = name;
         updatedCollected.clientPhone = phone;
-        message = `Got it! Could we also have your email address? (Type "skip" if you'd prefer not to share)`;
+        message = `Baik! Boleh saya dapatkan alamat emel awak juga? (Taip "skip" jika awak tidak mahu berkongsi)`;
         nextStep = 'email_opt';
         break;
       }
@@ -237,7 +287,7 @@ export async function POST(req: NextRequest) {
         const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput);
 
         if (!skip && !validEmail) {
-          message = 'Please enter a valid email address, or type "skip" to proceed.';
+          message = 'Sila masukkan alamat emel yang sah, atau taip "skip" untuk meneruskan. Terima kasih!';
           nextStep = 'email_opt';
           break;
         }
@@ -255,67 +305,140 @@ export async function POST(req: NextRequest) {
       case 'q1': {
         const answer = (userInput ?? '').trim();
         if (!answer || answer.length < 10) {
-          message = 'Please provide more detail to help the lawyer assess your case. Try to answer all questions above.';
+          message = 'Sila berikan maklumat lebih lanjut untuk membantu peguam menilai kes awak. Cuba jawab semua soalan di atas.';
           nextStep = 'q1';
           break;
         }
         updatedCollected.issueSummary = answer;
 
+        // Detect language from user's reply and persist for remaining steps
+        const detectedLang = detectLanguage(answer);
+        updatedCollected._lang = detectedLang;
+
         // Generate document recommendations based on issue context
         const issueForDocs = bridgeQuestion ?? answer;
-        message = generateDocumentRecommendations(issueForDocs);
+        message = generateDocumentRecommendations(issueForDocs, detectedLang);
         nextStep = 'q2';
         break;
       }
 
-      // ── Q2: USER ACKNOWLEDGES DOCUMENTS ──────────────────────
+      // ── Q2: USER ACKNOWLEDGES DOCUMENTS OR ASKS QUESTION ──────
       case 'q2': {
-        // Any response is valid — user is acknowledging the doc list
-        updatedCollected.docsAcknowledged = true;
+        const userResponse = (userInput ?? '').trim().toLowerCase();
+        const lang2 = (collected._lang ?? 'ms') as 'ms' | 'en';
 
-        const emailLine = lawyerEmail
-          ? `📧 **${lawyerEmail}**`
-          : `📧 *(please contact the lawyer directly)*`;
+        // Check if user typed "ok" or just confirmed
+        if (userResponse === 'ok') {
+          // User confirmed documents, move to q3
+          updatedCollected.docsAcknowledged = true;
+          const emailLine = lawyerEmail
+            ? `📧 **${lawyerEmail}**`
+            : lang2 === 'ms'
+              ? `📧 *(sila hubungi peguam terus)*`
+              : `📧 *(please contact the lawyer directly)*`;
 
-        const refLine = caseRef
-          ? `Please include **Case Reference: ${caseRef}** in your email subject.`
-          : ``;
+          const refLine = caseRef
+            ? lang2 === 'ms'
+              ? `Sila nyatakan **Rujukan Kes: ${caseRef}** dalam subjek emel awak.`
+              : `Please include **Case Reference: ${caseRef}** in your email subject.`
+            : ``;
 
-        message = [
-          `When you have gathered your documents, you may send them directly to the lawyer at:`,
-          ``,
-          emailLine,
-          refLine,
-          ``,
-          `This will help the lawyer review your case before your consultation.`,
-          ``,
-          `Now, when are you available to consult? And what is your preferred mode:`,
-          `• 📞 Phone call`,
-          `• 💻 Video meeting`,
-          `• 🏢 In-person appointment`,
-        ].filter(l => l !== undefined).join('\n');
-        nextStep = 'q3';
+          message = lang2 === 'ms'
+            ? [
+                `Apabila awak telah mengumpulkan dokumen, awak boleh menghantarnya terus kepada peguam di:`,
+                ``,
+                emailLine,
+                refLine,
+                ``,
+                `Ini akan membantu peguam menyemak kes awak sebelum konsultasi.`,
+                ``,
+                `Sekarang, bila awak ada masa untuk berunding? Dan apakah mod pilihan awak:`,
+                `• 📞 Panggilan telefon`,
+                `• 💻 Mesyuarat video`,
+                `• 🏢 Temujanji bersemuka`,
+              ].filter(l => l !== undefined).join('\n')
+            : [
+                `When you have gathered your documents, you may send them directly to the lawyer at:`,
+                ``,
+                emailLine,
+                refLine,
+                ``,
+                `This will help the lawyer review your case before your consultation.`,
+                ``,
+                `Now, when are you available to consult? And what is your preferred mode:`,
+                `• 📞 Phone call`,
+                `• 💻 Video meeting`,
+                `• 🏢 In-person appointment`,
+              ].filter(l => l !== undefined).join('\n');
+          nextStep = 'q3';
+        } else {
+          // User asked a question — answer ONE (1) question only
+          // Reference original question + lawyer's context
+          const originalQuestion = bridgeQuestion ?? collected.issueSummary ?? '';
+          let answerText = '';
+
+          // Chain of Thought: Analyze the question
+          if (userResponse.length > 0) {
+            // Example: Handle document format questions
+            if (userResponse.includes('asal') || userResponse.includes('original') ||
+                userResponse.includes('fotokopi') || userResponse.includes('copy') ||
+                userResponse.includes('gambar') || userResponse.includes('image')) {
+              answerText = lang2 === 'ms'
+                ? `Boleh, salinan digital atau gambar dokumen yang jelas sudah memadai untuk penilaian awal peguam. Seperti dalam Jawapan Peguam tadi, dokumen ini penting bagi mengesahkan konteks dalam Soalan Asal awak tentang "${originalQuestion.substring(0, 60)}...".\n\nSebarang soalan khusus saya mohon ajukan kepada peguam.`
+                : `Yes, a clear digital copy or photo of the document is acceptable for the lawyer's initial assessment. As mentioned in the lawyer's previous response, this document is important for confirming the context of your original question about "${originalQuestion.substring(0, 60)}...".\n\nFor any specific questions, please ask the lawyer directly.`;
+            } else {
+              // Generic answer for other questions
+              answerText = lang2 === 'ms'
+                ? `Pertanyaan awak berkaitan dokumen-dokumen untuk kes awak tentang "${originalQuestion.substring(0, 60)}...". Peguam akan memberikan panduan lebih terperinci semasa konsultasi berdasarkan dokumen yang awak sediakan.\n\nSebarang soalan khusus saya mohon ajukan kepada peguam.`
+                : `Your question is related to the documents needed for your case about "${originalQuestion.substring(0, 60)}...". The lawyer will provide more detailed guidance during the consultation based on the documents you prepare.\n\nFor any specific questions, please ask the lawyer directly.`;
+            }
+
+            message = answerText;
+            // Auto-move to q3 after answering
+            updatedCollected.docsAcknowledged = true;
+
+            // Add closing + next question
+            const nextQMessage = lang2 === 'ms'
+              ? `\n\n---\n\nSekarang, bila awak ada masa untuk berunding? Dan apakah mod pilihan awak:\n• 📞 Panggilan telefon\n• 💻 Mesyuarat video\n• 🏢 Temujanji bersemuka`
+              : `\n\n---\n\nNow, when are you available to consult? And what is your preferred mode:\n• 📞 Phone call\n• 💻 Video meeting\n• 🏢 In-person appointment`;
+
+            message += nextQMessage;
+            nextStep = 'q3';
+          }
+        }
         break;
       }
 
       // ── Q3: CONSULTATION PREFERENCE & AVAILABILITY ───────────
       case 'q3': {
         const preference = (userInput ?? '').trim();
+        const lang3 = (collected._lang ?? 'ms') as 'ms' | 'en';
         if (!preference || preference.length < 2) {
-          message = 'Please let us know your availability and preferred consultation mode.';
+          message = lang3 === 'ms'
+            ? 'Sila beritahu saya ketersediaan dan mod konsultasi pilihan awak.'
+            : 'Please let us know your availability and preferred consultation mode.';
           nextStep = 'q3';
           break;
         }
         updatedCollected.consultationPreference = preference;
 
-        message = [
-          `Understood. One more thing — do you need this handled urgently?`,
-          ``,
-          `We can arrange an appointment as soon as possible, however a **small emergency fee** may apply.`,
-          ``,
-          `• Yes — I need this as soon as possible`,
-          `• No — standard timeline is fine`,
-        ].join('\n');
+        message = lang3 === 'ms'
+          ? [
+              `Faham. Satu lagi perkara — adakah awak perlukan ini diuruskan dengan segera?`,
+              ``,
+              `Saya boleh mengatur temujanji seawal mungkin, namun **yuran kecemasan** mungkin dikenakan.`,
+              ``,
+              `• Ya — Saya perlukan ini secepat mungkin`,
+              `• Tidak — Tempoh standard adalah baik`,
+            ].join('\n')
+          : [
+              `Understood. One more thing — do you need this handled urgently?`,
+              ``,
+              `We can arrange an appointment as soon as possible, however a **small emergency fee** may apply.`,
+              ``,
+              `• Yes — I need this as soon as possible`,
+              `• No — standard timeline is fine`,
+            ].join('\n');
         nextStep = 'q4';
         break;
       }
@@ -325,13 +448,22 @@ export async function POST(req: NextRequest) {
         const urgency = (userInput ?? '').trim();
         updatedCollected.urgencyPreference = urgency;
 
-        message = [
-          `Thank you for sharing all of this.`,
-          ``,
-          `Is there anything else you'd like the lawyer to know, or are you satisfied with what has been shared? Feel free to leave any additional remarks or questions below.`,
-          ``,
-          `*(Type "none" if you have nothing to add)*`,
-        ].join('\n');
+        const lang4 = (collected._lang ?? 'ms') as 'ms' | 'en';
+        message = lang4 === 'ms'
+          ? [
+              `Terima kasih kerana berkongsi semua ini.`,
+              ``,
+              `Adakah ada lagi yang anda ingin peguam tahu, atau adakah anda berpuas hati dengan apa yang telah dikongsi? Sila tinggalkan sebarang catatan atau pertanyaan tambahan di bawah.`,
+              ``,
+              `*(Taip "tiada" jika tiada yang hendak ditambah)*`,
+            ].join('\n')
+          : [
+              `Thank you for sharing all of this.`,
+              ``,
+              `Is there anything else you'd like the lawyer to know, or are you satisfied with what has been shared? Feel free to leave any additional remarks or questions below.`,
+              ``,
+              `*(Type "none" if you have nothing to add)*`,
+            ].join('\n');
         nextStep = 'q5';
         break;
       }
@@ -339,7 +471,8 @@ export async function POST(req: NextRequest) {
       // ── Q5: FINAL REMARKS → SUBMIT ────────────────────────────
       case 'q5': {
         const remarks = (userInput ?? '').trim();
-        updatedCollected.remarks = remarks !== 'none' ? remarks : null;
+        const lang5 = (collected._lang ?? 'ms') as 'ms' | 'en';
+        updatedCollected.remarks = (remarks !== 'none' && remarks !== 'tiada') ? remarks : null;
 
         const finalIssueSummary =
           updatedCollected.issueSummary ?? bridgeQuestion ?? 'Inquiry submitted via Donna';
@@ -376,13 +509,21 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        message = [
-          `Thank you, ${updatedCollected.clientName ?? 'there'}! Your enquiry has been recorded.`,
-          ``,
-          `The lawyer will review your case and get back to you within **5 working days**.`,
-          ``,
-          `In the meantime, please gather the documents we mentioned and send them to the lawyer's email with your case reference${caseRef ? ` **(${caseRef})**` : ''}.`,
-        ].join('\n');
+        message = lang5 === 'ms'
+          ? [
+              `Terima kasih, ${updatedCollected.clientName ?? 'awak'}! Pertanyaan awak telah direkodkan.`,
+              ``,
+              `Peguam akan menyemak kes awak dan memberikan maklum balas dalam masa **5 hari bekerja**.`,
+              ``,
+              `Sementara itu, sila kumpulkan dokumen yang telah saya sebutkan dan hantarkan kepada peguam melalui emel dengan rujukan kes awak${caseRef ? ` **(${caseRef})**` : ''}.`,
+            ].join('\n')
+          : [
+              `Thank you, ${updatedCollected.clientName ?? 'there'}! Your enquiry has been recorded.`,
+              ``,
+              `The lawyer will review your case and get back to you within **5 working days**.`,
+              ``,
+              `In the meantime, please gather the documents we mentioned and send them to the lawyer's email with your case reference${caseRef ? ` **(${caseRef})**` : ''}.`,
+            ].join('\n');
 
         nextStep = 'done';
         done = true;
@@ -390,7 +531,7 @@ export async function POST(req: NextRequest) {
       }
 
       default: {
-        message  = 'This session has ended. Thank you!';
+        message  = 'Sesi ini telah tamat. Terima kasih!';
         nextStep = 'done';
         done     = true;
       }
