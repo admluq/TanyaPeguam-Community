@@ -113,7 +113,7 @@ function BridgeCreator({ onCreated }: { onCreated: () => void }) {
               className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 resize-none" rows={2} />
           </div>
           <div>
-            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Lawyer's Initial Advice</label>
+            <label className="text-xs text-cream/60 uppercase tracking-wider block mb-1.5">Lawyer's Advice</label>
             <textarea value={answer} onChange={e => { setAnswer(e.target.value); setError(''); }}
               placeholder="E.g. Can file claim at HDA Tribunal. I need S&P and receipt of payment."
               className="w-full bg-ink-400 border border-ink-300/30 rounded-lg p-3 text-cream text-sm placeholder-cream/40 focus:outline-none focus:border-purple-500 resize-none" rows={3} />
@@ -396,7 +396,7 @@ function BridgeRow({
             </p>
           </div>
           <div>
-            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Lawyer's Initial Advice</p>
+            <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-1">Lawyer's Advice</p>
             <p className="text-sm text-cream/80 whitespace-pre-wrap bg-ink-500/40 rounded p-3 leading-relaxed">
               {bridge.initialAnswer ?? '—'}
             </p>
