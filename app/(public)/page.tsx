@@ -17,9 +17,9 @@ export default async function Home() {
   const session = await auth();
   if (session?.user) redirect('/profile');
 
-  // Fetch count of active lawyer profiles
+  // Fetch count of public lawyer profiles
   const lawyerCount = await db.lawyerProfile.count({
-    where: { status: 'ACTIVE' },
+    where: { isPublic: true },
   });
 
   return (
