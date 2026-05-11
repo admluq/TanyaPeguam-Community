@@ -25,7 +25,7 @@ const STATUS_STYLE: Record<BridgeStatus, { label: string; dot: string; pill: str
   ACTIVE:    { label: 'Active',   dot: 'bg-green-400',  pill: 'text-green-300 bg-green-900/20 border-green-500/30' },
   COMPLETED: { label: 'Complete', dot: 'bg-blue-400',   pill: 'text-blue-300 bg-blue-900/20 border-blue-500/30' },
   EXPIRED:   { label: 'Expired',   dot: 'bg-yellow-500', pill: 'text-yellow-300 bg-yellow-900/20 border-yellow-600/30', dim: true },
-  DELETED:   { label: 'Dipadam', dot: 'bg-red-600',    pill: 'text-red-300 bg-red-900/20 border-red-700/30', dim: true },
+  DELETED:   { label: 'Deleted', dot: 'bg-red-600',    pill: 'text-red-300 bg-red-900/20 border-red-700/30', dim: true },
 };
 
 type FilterKey = '' | BridgeStatus;
@@ -34,7 +34,7 @@ const FILTER_TABS: { key: FilterKey; label: string }[] = [
   { key: 'ACTIVE',    label: 'Active' },
   { key: 'COMPLETED', label: 'Complete' },
   { key: 'EXPIRED',   label: 'Expired' },
-  { key: 'DELETED',   label: 'Dipadam' },
+  { key: 'DELETED',   label: 'Deleted' },
   { key: '',          label: 'All' },
 ];
 
@@ -239,7 +239,7 @@ function buildLog(bridges: Bridge[]): LogEntry[] {
         shortCode: b.shortCode,
         question: b.initialQuestion,
         clientName: null,
-        eventLabel: 'Dipadam',
+        eventLabel: 'Deleted',
         eventColor: 'text-red-400',
         detail: 'URL tidak aktif',
       });
@@ -383,7 +383,7 @@ function BridgeRow({
               <code className="text-xs font-mono text-green-400 break-all bg-ink-500/40 block px-2 py-1.5 rounded">{url}</code>
             ) : (
               <span className="text-xs text-cream/30 italic">
-                {bridge.status === 'DELETED' ? 'URL dimatikan — pautan tidak aktif' : `Pautan ${st.label.toLowerCase()}`}
+                {bridge.status === 'DELETED' ? 'URL disabled — link inactive' : `Link ${st.label.toLowerCase()}`}
               </span>
             )}
           </div>
