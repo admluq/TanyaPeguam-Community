@@ -101,7 +101,7 @@ function BridgeCreator({ onCreated }: { onCreated: () => void }) {
       <p className="text-xs text-cream/50 mb-4">
         Paste your Facebook question + initial advice → create unique link to share.{' '}
         <span className="text-yellow-400">Expires after 3 days</span> with no response, or{' '}
-        <span className="text-yellow-400">30 minutes</span> of inactivity.
+        <span className="text-yellow-400">30 minutes</span> of inactivity once chat starts.
       </p>
 
       {!result ? (
