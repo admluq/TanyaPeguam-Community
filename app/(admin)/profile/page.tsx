@@ -3,7 +3,9 @@
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import LawyerAvatar from '@/components/LawyerAvatar';
+import SetupProgress from '@/components/SetupProgress';
 
 const STATUS_OPTIONS = [
   { value: 'AVAILABLE', label: 'Available' },
@@ -19,6 +21,9 @@ export default function ProfileSetupPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [form, setForm] = useState({
     // Profile basics
@@ -46,6 +51,62 @@ export default function ProfileSetupPage() {
 
     isPublic: false,
   });
+
+  // Resize image to max 240px and return base64 JPEG
+  function resizeImage(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const MAX = 240;
+          let { width, height } = img;
+          if (width > height) {
+            if (width > MAX) { height = Math.round(height * MAX / width); width = MAX; }
+          } else {
+            if (height > MAX) { width = Math.round(width * MAX / height); height = MAX; }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return reject(new Error('Canvas unavailable'));
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.85));
+        };
+        img.onerror = reject;
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handleAvatarFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { setError('Please select an image file.'); return; }
+    setAvatarUploading(true);
+    setError(null);
+    try {
+      const b64 = await resizeImage(file);
+      setAvatarUrl(b64);
+    } catch {
+      setError('Failed to process image. Please try a different file.');
+    } finally {
+      setAvatarUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  function handleUseGooglePhoto() {
+    const googleImg = session?.user?.image ?? null;
+    if (googleImg) setAvatarUrl(googleImg);
+  }
+
+  function handleRemoveAvatar() {
+    setAvatarUrl(null);
+  }
 
   useEffect(() => {
     if (status === 'unauthenticated') {
@@ -86,6 +147,8 @@ export default function ProfileSetupPage() {
           isPublic: profile.isPublic || false,
         });
 
+        if (profile.avatarUrl) setAvatarUrl(profile.avatarUrl);
+
         // Set preview URL if profile has a slug
         if (profile.slug) {
           setPreviewUrl(`/${profile.slug}`);
@@ -122,6 +185,7 @@ export default function ProfileSetupPage() {
           whatsapp: form.socialWhatsapp,
         },
         isPublic: form.isPublic,
+        avatarUrl: avatarUrl ?? null,
       };
 
       const res = await fetch('/api/admin/profile', {
@@ -150,6 +214,9 @@ export default function ProfileSetupPage() {
   return (
     <div className="min-h-screen bg-black p-6">
       <div className="max-w-4xl mx-auto">
+        {/* Onboarding progress — auto-hides when all steps done */}
+        <SetupProgress />
+
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-cream mb-2">Digital Card Setup</h1>
@@ -158,6 +225,67 @@ export default function ProfileSetupPage() {
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-8">
+
+          {/* SECTION 0: PROFILE PICTURE */}
+          <div className="card-base border border-purple/20 rounded-lg p-6">
+            <h2 className="text-lg font-bold text-cream mb-1">Profile Picture</h2>
+            <p className="text-xs text-cream/50 mb-5">Displayed on your Digital Card, Directory, and Bridge link.</p>
+
+            <div className="flex items-center gap-6">
+              {/* Current avatar preview */}
+              <LawyerAvatar
+                avatarUrl={avatarUrl}
+                googleImage={session?.user?.image}
+                name={form.username || session?.user?.name || 'P'}
+                size={80}
+                className="rounded-2xl ring-2 ring-purple-500/30"
+              />
+
+              <div className="flex flex-col gap-2">
+                {/* Upload button */}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={avatarUploading}
+                  className="px-4 py-2 rounded-lg bg-purple-500 text-ink-500 text-sm font-semibold hover:bg-purple-400 disabled:opacity-50 transition"
+                >
+                  {avatarUploading ? 'Processing…' : 'Upload Photo'}
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleAvatarFile}
+                  className="hidden"
+                />
+
+                {/* Use Google photo */}
+                {session?.user?.image && !avatarUrl?.startsWith('data:') && (
+                  <button
+                    type="button"
+                    onClick={handleUseGooglePhoto}
+                    className="px-4 py-2 rounded-lg bg-ink-300/40 text-cream/70 text-sm hover:bg-ink-300/60 transition border border-white/10"
+                  >
+                    Use Google Photo
+                  </button>
+                )}
+
+                {/* Remove */}
+                {avatarUrl && (
+                  <button
+                    type="button"
+                    onClick={handleRemoveAvatar}
+                    className="text-xs text-red-400 hover:text-red-300 transition text-left"
+                  >
+                    Remove photo
+                  </button>
+                )}
+
+                <p className="text-[11px] text-cream/35 mt-1">Max 5 MB · JPG, PNG, WebP · Auto-resized to 240px</p>
+              </div>
+            </div>
+          </div>
+
           {/* SECTION 1: PEGUAM */}
           <div className="card-base border border-purple/20 rounded-lg p-6">
             <h2 className="text-lg font-bold text-cream mb-4">

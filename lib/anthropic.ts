@@ -10,9 +10,6 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY || '',
-  defaultHeaders: {
-    'anthropic-beta': 'prompt-caching-2024-07-16',
-  },
 });
 
 export { client };

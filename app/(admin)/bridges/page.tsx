@@ -17,8 +17,27 @@ interface Bridge {
   practiceArea: string | null;
   summary: string | null;
   turnCount: number;
+  chatPhase: string;
+  agentTurnCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+// Map granular chat phase to a short agent badge label
+function phaseToAgentBadge(phase: string): { label: string; style: string } | null {
+  if (['start', 'name_phone', 'email_opt', 'q1'].includes(phase)) {
+    return { label: 'Agent A — Intake', style: 'text-purple-300 bg-purple-900/20 border-purple-500/30' };
+  }
+  if (phase === 'q2') {
+    return { label: 'Agent B — Triage', style: 'text-yellow-300 bg-yellow-900/20 border-yellow-600/30' };
+  }
+  if (['q3', 'q4'].includes(phase)) {
+    return { label: 'Agent C — Market', style: 'text-green-300 bg-green-900/20 border-green-500/30' };
+  }
+  if (phase === 'q5') {
+    return { label: 'Agent D — Summary', style: 'text-blue-300 bg-blue-900/20 border-blue-500/30' };
+  }
+  return null; // 'done' or unknown — no badge needed (status badge already shows Complete)
 }
 
 const STATUS_STYLE: Record<BridgeStatus, { label: string; dot: string; pill: string; dim?: boolean }> = {
@@ -352,6 +371,14 @@ function BridgeRow({
                   {bridge.turnCount}/3 jawapan
                 </span>
               )}
+              {bridge.status === 'ACTIVE' && (() => {
+                const badge = phaseToAgentBadge(bridge.chatPhase ?? 'start');
+                return badge ? (
+                  <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${badge.style}`}>
+                    {badge.label}
+                  </span>
+                ) : null;
+              })()}
             </div>
             <p className="text-xs text-cream/50 mt-0.5 line-clamp-1">{bridge.initialQuestion ?? '—'}</p>
           </div>

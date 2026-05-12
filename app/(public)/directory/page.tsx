@@ -1,5 +1,6 @@
 import { db } from '@/lib/db';
 import Link from 'next/link';
+import LawyerAvatar from '@/components/LawyerAvatar';
 
 export const revalidate = 60;
 
@@ -22,8 +23,9 @@ export default async function DirectoryPage() {
       firmName: true,
       bio: true,
       status: true,
+      avatarUrl: true,
       donnaConfig: { select: { id: true } },
-      user: { select: { name: true } },
+      user: { select: { name: true, image: true } },
     },
   });
 
@@ -54,6 +56,14 @@ export default async function DirectoryPage() {
               return (
                 <Link key={profile.id} href={`/directory/${profile.slug}`} className="group">
                   <div className={`border ${st.border} hover:border-purple-500/60 rounded-lg p-6 transition h-full cursor-pointer bg-white/[0.02] hover:bg-white/[0.04]`}>
+                    {/* Avatar */}
+                    <LawyerAvatar
+                      avatarUrl={profile.avatarUrl}
+                      googleImage={profile.user?.image}
+                      name={profile.username || profile.user?.name || 'P'}
+                      size={56}
+                      className="rounded-xl mb-4"
+                    />
                     {/* Name + Status badge */}
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex-1 min-w-0">

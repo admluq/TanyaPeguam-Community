@@ -2,6 +2,7 @@ import { db } from '@/lib/db';
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import type { Metadata } from 'next';
+import LawyerAvatar from '@/components/LawyerAvatar';
 
 export const revalidate = 60;
 
@@ -43,12 +44,13 @@ export default async function LawyerProfilePage({ params }: { params: { slug: st
       firmName: true,
       bio: true,
       status: true,
+      avatarUrl: true,
       firmWebsite: true,
       googleMapsUrl: true,
       socialLinks: true,
       isPublic: true,
       donnaConfig: { select: { id: true } },
-      user: { select: { name: true } },
+      user: { select: { name: true, image: true } },
     },
   });
 
@@ -69,6 +71,13 @@ export default async function LawyerProfilePage({ params }: { params: { slug: st
 
           {/* Identity block */}
           <div className="mb-8">
+            <LawyerAvatar
+              avatarUrl={profile.avatarUrl}
+              googleImage={profile.user?.image}
+              name={profile.username || profile.user?.name || 'Lawyer'}
+              size={80}
+              className="rounded-2xl mb-5"
+            />
             <h1 className="text-5xl font-bold text-cream mb-3">
               {profile.username || profile.user?.name || 'Lawyer'}
             </h1>

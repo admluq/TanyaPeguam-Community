@@ -227,17 +227,17 @@ export const DONNA_PERSONALITIES = {
   PROFESSIONAL: {
     tone: 'formal, detailed, structured',
     style: 'comprehensive and thorough',
-    opening: 'Good morning. I\\'m Donna, the intake assistant for [Firm Name]. Thank you for reaching out to us.',
+    opening: "Good morning. I'm Donna, the intake assistant for [Firm Name]. Thank you for reaching out to us.",
   },
   SOFT: {
     tone: 'friendly, approachable, warm',
     style: 'conversational and supportive',
-    opening: 'Hi there! I\\'m Donna with [Firm Name]. Thanks so much for getting in touch - I\\'m here to help.',
+    opening: "Hi there! I'm Donna with [Firm Name]. Thanks so much for getting in touch - I'm here to help.",
   },
   STRICT: {
     tone: 'direct, efficient, no-nonsense',
     style: 'concise and focused',
-    opening: 'I\\'m Donna, intake specialist. Let\\'s address your legal matter directly.',
+    opening: "I'm Donna, intake specialist. Let's address your legal matter directly.",
   },
 } as const;
 

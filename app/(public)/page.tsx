@@ -18,9 +18,10 @@ export default async function Home() {
   if (session?.user) redirect('/profile');
 
   // Fetch count of public lawyer profiles
-  const lawyerCount = await db.lawyerProfile.count({
-    where: { isPublic: true },
-  });
+  let lawyerCount = 0;
+  try {
+    lawyerCount = await db.lawyerProfile.count({ where: { isPublic: true } });
+  } catch { /* DB unreachable — show fallback */ }
 
   return (
     <div className="min-h-screen text-cream" style={{

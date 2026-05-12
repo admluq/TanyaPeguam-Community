@@ -138,6 +138,9 @@ export async function getBridgeByShortCode(shortCode: string) {
       initialAnswer: true,
       chatTranscript: true,
       conversationId: true,
+      chatPhase: true,
+      agentTurnCount: true,
+      extractedEntities: true,
       createdAt: true,
       profile: {
         select: {
@@ -145,7 +148,8 @@ export async function getBridgeByShortCode(shortCode: string) {
           username: true,
           position: true,
           firmName: true,
-          user: { select: { name: true } },
+          avatarUrl: true,
+          user: { select: { name: true, image: true } },
         },
       },
     },
@@ -262,6 +266,76 @@ export async function autoExpireStale(profileId: string): Promise<number> {
     data: { status: 'EXPIRED' },
   });
   return result.count;
+}
+
+// ── New helpers for server-authoritative state ─────────────────────────────
+
+/**
+ * Update the server-authoritative chat phase after a successful agent transition.
+ * Only writes `chatPhase` — never touches immutable Q/A.
+ */
+export async function updateChatPhase(bridgeId: string, phase: string): Promise<void> {
+  await db.donnaBridge.update({
+    where: { id: bridgeId },
+    data: { chatPhase: phase },
+  });
+}
+
+/**
+ * Increment agentTurnCount by 1. Called once per user message in Agent A.
+ */
+export async function incrementAgentTurnCount(bridgeId: string): Promise<void> {
+  await db.donnaBridge.update({
+    where: { id: bridgeId },
+    data: { agentTurnCount: { increment: 1 } },
+  });
+}
+
+/**
+ * Merge new entity fields into the existing extractedEntities JSON.
+ * Performs a shallow merge — existing keys are preserved unless overwritten.
+ * Null values are written (to record "user skipped this field").
+ */
+export async function mergeExtractedEntities(
+  bridgeId: string,
+  incoming: Record<string, string | null>
+): Promise<void> {
+  const bridge = await db.donnaBridge.findUnique({
+    where: { id: bridgeId },
+    select: { extractedEntities: true },
+  });
+  if (!bridge) return;
+
+  const current = (bridge.extractedEntities as Record<string, string | null>) ?? {};
+  const merged = { ...current, ...incoming };
+
+  await db.donnaBridge.update({
+    where: { id: bridgeId },
+    data: { extractedEntities: merged },
+  });
+}
+
+/**
+ * Load the server-authoritative chat state for a bridge.
+ * Used by /api/donna-chat to determine the current phase without trusting the client.
+ */
+export async function getBridgeChatState(bridgeId: string): Promise<{
+  chatPhase: string;
+  agentTurnCount: number;
+  extractedEntities: Record<string, string | null>;
+  status: string;
+} | null> {
+  const bridge = await db.donnaBridge.findUnique({
+    where: { id: bridgeId },
+    select: { chatPhase: true, agentTurnCount: true, extractedEntities: true, status: true },
+  });
+  if (!bridge) return null;
+  return {
+    chatPhase: bridge.chatPhase,
+    agentTurnCount: bridge.agentTurnCount,
+    extractedEntities: (bridge.extractedEntities as Record<string, string | null>) ?? {},
+    status: bridge.status,
+  };
 }
 
 export type { DonnaBridge, BridgeStatus };

@@ -1,821 +1,725 @@
 import { db } from '@/lib/db';
 import { NextRequest, NextResponse } from 'next/server';
+import { DONNA_MODELS } from '@/lib/donna-constants';
 import { createInquiry } from '@/lib/inquiry';
-import { completeBridgeOnIntake, appendTurn } from '@/lib/bridge';
+import {
+  completeBridgeOnIntake,
+  appendTurn,
+  updateChatPhase,
+  incrementAgentTurnCount,
+  mergeExtractedEntities,
+  getBridgeChatState,
+} from '@/lib/bridge';
+import anthropic from '@/lib/anthropic';
+import { buildContextBundle, buildAntiHallucinationGuardrail, phaseToAgentLabel, type ContextBundle } from '@/lib/donna-context';
 
-// ── Q1: Context-aware probing questions about the problem (Malay) ─────
-function generateProbingQuestions(issue: string): string {
-  const lower = issue.toLowerCase();
+// ─────────────────────────────────────────────────────────────────────────────
+// Donna 4-Agent Orchestrator — Context-Aware, Server-Authoritative Phase
+//
+// Phase is NEVER trusted from the client. It is always loaded from DonnaBridge.chatPhase.
+// This prevents clients from skipping intake steps.
+//
+// Flow:  start → name_phone → email_opt → q1 → q2 → q3 → q4 → q5 → done
+//        Agent:  ────────── A ──────────────── → B ──── → ── C ── → D
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const isTermination = /buang|pecat|resign|terminate|kerjasama|tamat|gaji|majikan|kerja/.test(lower);
-  const isContract    = /kontrak|perjanjian|deal|agreement|bayar|hutang/.test(lower);
-  const isProperty    = /hartanah|tanah|rumah|bangunan|property|developer|pemaju|konveyan/.test(lower);
-  const isFamily      = /perkahwinan|cerai|anak|warisan|keluarga|pusaka|nafkah/.test(lower);
+type ChatPhase =
+  | 'start'
+  | 'name_phone'
+  | 'email_opt'
+  | 'q1'
+  | 'q2'
+  | 'q3'
+  | 'q4'
+  | 'q5'
+  | 'done';
 
-  const jangan = `\nJangan risau, awak boleh terangkan dalam bahasa inggeris atau bahasa melayu.`;
+// ── Claude call helper ──────────────────────────────────────────────────────
 
-  if (isTermination) return [
-    `Untuk membantu peguam menilai kes pekerjaan awak, sila jawab soalan berikut:`,
-    ``,
-    `1. Bila awak ditamatkan dan bagaimana ia dimaklumkan — secara lisan atau bertulis? Siapa yang memaklumkan awak?`,
-    `2. Berapa lama awak bekerja dan dalam jawatan apa? Adakah awak ada kontrak atau Surat Tawaran?`,
-    `3. Apakah sebab (jika ada) yang majikan berikan untuk penamatan tersebut?`,
-  ].join('\n') + jangan;
+async function callClaude(
+  systemPrompt: string,
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>,
+  userMessage: string,
+  maxTokens = 600
+): Promise<string> {
+  const messages = [
+    ...conversationHistory.map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    })),
+    { role: 'user' as const, content: userMessage },
+  ];
 
-  if (isContract) return [
-    `Untuk membantu peguam menilai pertikaian kontrak awak, sila jawab:`,
-    ``,
-    `1. Apakah yang telah dipersetujui dan siapa pihak-pihak yang terlibat? Adakah ia bertulis atau lisan?`,
-    `2. Bila peraturan ini bermula dan apa yang telah dilakukan/dibayar setakat ini?`,
-    `3. Apakah pelanggaran atau isu khusus yang berlaku dan bila ia bermula?`,
-  ].join('\n') + jangan;
-
-  if (isProperty) return [
-    `Untuk membantu peguam menilai kes hartanah awak, sila jawab:`,
-    ``,
-    `1. Apakah jenis hartanah yang terlibat dan apakah isu — pembelian, pemilikan, sewaan, atau pertikaian?`,
-    `2. Siapa pihak-pihak lain yang terlibat (pemaju, penjual, bank, penyewa)?`,
-    `3. Adakah sebarang bayaran telah dibuat? Apakah status semasa hartanah tersebut?`,
-  ].join('\n') + jangan;
-
-  if (isFamily) return [
-    `Untuk membantu peguam memahami kes keluarga awak, sila jawab:`,
-    ``,
-    `1. Apakah hubungan awak dengan pihak lain dan apakah hasil yang awak cari?`,
-    `2. Adakah kanak-kanak atau aset bersama yang terlibat?`,
-    `3. Adakah sebarang perjanjian atau perintah mahkamah terdahulu berkaitan perkara ini?`,
-  ].join('\n') + jangan;
-
-  return [
-    `Untuk membantu peguam menilai kes awak, sila jawab:`,
-    ``,
-    `1. Bila situasi ini bermula dan siapa pihak-pihak yang terlibat?`,
-    `2. Apakah tindakan atau keputusan yang telah diambil setakat ini?`,
-    `3. Apakah hasil yang awak harapkan untuk dicapai?`,
-  ].join('\n') + jangan;
+  try {
+    const response = await anthropic.messages.create({
+      model: DONNA_MODELS.INTAKE,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages,
+    });
+    const block = response.content[0];
+    if (block.type === 'text') return block.text;
+    return '';
+  } catch (err: any) {
+    console.error('[callClaude] Anthropic error:', err?.status, err?.message, err?.error);
+    throw err;
+  }
 }
 
-// ── Q2: Context-aware document recommendations ────────────────────────
-function generateDocumentRecommendations(issue: string, lang: 'ms' | 'en' = 'ms'): string {
-  const lower = issue.toLowerCase();
+// ── Intent classifier (keyword-based, no LLM call) ─────────────────────────
+// Returns the user's intent category to decide whether to advance the phase.
 
-  // Criminal must be checked first — break-in also contains "rumah" which would
-  // otherwise trigger the property branch.
-  const isCriminal    = /pencuri|curi|rompak|pecah rumah|break.?in|stolen|theft|burglar|jenayah|criminal|tangkap|ditangkap|kes polis|laporan polis|IO\b|polis tangkap|DNAA|seksyen\s*4[01]\d|section\s*4[01]\d|exhibit|barang bukti|bahan bukti|jewel|barang kemas|gold|emas|wang tunai|purse|dompet/i.test(lower);
-  const isTermination = /buang|pecat|resign|terminate|kerjasama|tamat|gaji|majikan|kerja/.test(lower);
-  const isContract    = /kontrak|perjanjian|deal|agreement|bayar|hutang/.test(lower);
-  const isProperty    = /hartanah|tanah|rumah|bangunan|property|developer|pemaju|konveyan/.test(lower);
-  const isFamily      = /perkahwinan|cerai|anak|warisan|keluarga|pusaka|nafkah/.test(lower);
+type UserIntent = 'direct_answer' | 'question' | 'correction' | 'off_topic';
 
-  let docsEn: string;
-  let docsMs: string;
+function classifyIntent(input: string, currentPhase: ChatPhase): UserIntent {
+  const t = input.toLowerCase().trim();
 
-  if (isCriminal) {
-    docsEn = [
-      `• Original police report (Laporan Polis) for the incident`,
-      `• Photos or receipts proving ownership of the stolen items`,
-      `• Court case number / case reference from the IO or DPP`,
-      `• Any written communications with the Investigating Officer (IO)`,
-      `• Witness statements or AirTag / CCTV evidence (if available)`,
-    ].join('\n');
-    docsMs = [
-      `• Laporan Polis (Repot) asal berkaitan kes tersebut`,
-      `• Gambar atau resit sebagai bukti pemilikan barang yang dicuri`,
-      `• Nombor kes mahkamah / rujukan kes daripada IO atau DPP`,
-      `• Sebarang surat menyurat bertulis dengan Pegawai Penyiasat (IO)`,
-      `• Keterangan saksi atau bukti AirTag / CCTV (jika ada)`,
-    ].join('\n');
-  } else if (isTermination) {
-    docsEn = [
-      `• Employment contract / Letter of Offer`,
-      `• Termination letter or show-cause letter`,
-      `• Last 3 months' payslips`,
-      `• Any related emails or written warnings`,
-      `• Attendance or performance records`,
-    ].join('\n');
-    docsMs = [
-      `• Kontrak pekerjaan atau Surat Tawaran`,
-      `• Surat penamatan atau surat tunjuk sebab`,
-      `• Gaji 3 bulan terakhir`,
-      `• Sebarang emel atau amaran bertulis`,
-      `• Rekod kehadiran atau prestasi kerja`,
-    ].join('\n');
-  } else if (isContract) {
-    docsEn = [
-      `• Original contract or agreement`,
-      `• Any amendments or addendums`,
-      `• Proof of payment or transactions`,
-      `• Related correspondence (emails, letters)`,
-      `• Invoices or receipts`,
-    ].join('\n');
-    docsMs = [
-      `• Kontrak atau perjanjian asal`,
-      `• Pindaan atau lampiran tambahan`,
-      `• Bukti pembayaran atau transaksi`,
-      `• Surat-menyurat berkaitan (emel/surat)`,
-      `• Invois atau resit`,
-    ].join('\n');
-  } else if (isProperty) {
-    docsEn = [
-      `• Sale & Purchase Agreement (SPA)`,
-      `• Land title or ownership document`,
-      `• Payment receipts (deposit, instalments)`,
-      `• Correspondence with developer/seller/bank`,
-      `• Bank loan statement (if applicable)`,
-    ].join('\n');
-    docsMs = [
-      `• Perjanjian Jual Beli (SPA)`,
-      `• Dokumen hak milik atau pemilikan hartanah`,
-      `• Resit pembayaran (deposit, ansuran)`,
-      `• Surat-menyurat dengan pemaju/penjual/bank`,
-      `• Penyata pinjaman bank (jika berkaitan)`,
-    ].join('\n');
-  } else if (isFamily) {
-    docsEn = [
-      `• Marriage certificate`,
-      `• Children's birth certificates (if relevant)`,
-      `• Any existing court orders or agreements`,
-      `• Joint asset documents (property, bank accounts)`,
-      `• Will or inheritance documents (if relevant)`,
-    ].join('\n');
-    docsMs = [
-      `• Sijil nikah`,
-      `• Sijil kelahiran anak-anak (jika berkaitan)`,
-      `• Sebarang perintah mahkamah atau perjanjian`,
-      `• Dokumen aset bersama (hartanah, akaun bank)`,
-      `• Surat wasiat atau dokumen warisan (jika berkaitan)`,
-    ].join('\n');
-  } else {
-    docsEn = [
-      `• Any contract or agreement related to the matter`,
-      `• Proof of payment or transactions`,
-      `• Related correspondence (emails, messages, letters)`,
-      `• Identity document (MyKad)`,
-      `• Any other relevant evidence or records`,
-    ].join('\n');
-    docsMs = [
-      `• Sebarang kontrak atau perjanjian berkaitan`,
-      `• Bukti pembayaran atau transaksi`,
-      `• Surat-menyurat berkaitan (emel/mesej/surat)`,
-      `• Dokumen pengenalan diri (MyKad)`,
-      `• Sebarang bukti atau rekod lain yang berkaitan`,
-    ].join('\n');
+  // Gibberish: mostly non-alphanumeric, very short, or repeated chars
+  if (/^[^a-zA-ZÀ-ɏ0-9\s]{4,}$/.test(t) || /^(.)\1{5,}$/.test(t)) {
+    return 'off_topic';
   }
 
-  const docs = lang === 'ms' ? docsMs : docsEn;
-
-  if (lang === 'ms') {
-    return [
-      `Berdasarkan kes awak, saya mengesyorkan awak mengumpulkan dokumen-dokumen berikut sebelum konsultasi dengan peguam:`,
-      ``,
-      docs,
-      ``,
-      `Sila cari dan sediakan dokumen-dokumen ini — ia akan mempercepatkan penilaian peguam terhadap kes awak. Taip "ok" atau beritahu saya jika ada pertanyaan tentang dokumen-dokumen tersebut.`,
-    ].join('\n');
+  // Correction signals — used for Anti-Hallucination pivot
+  if (/\b(takde|tidak ada|bukan|salah|tiada|mana ada|tak betul|wrong|incorrect|bukan kes|bukan jenis)\b/.test(t)) {
+    return 'correction';
   }
 
-  return [
-    `Based on your case, we recommend gathering the following documents before your consultation with the lawyer:`,
-    ``,
-    docs,
-    ``,
-    `Please locate and prepare these — having them ready will significantly speed up the lawyer's assessment of your case. Type "ok" or let us know if you have any questions about the documents.`,
-  ].join('\n');
+  // Question signals — answer from KB, then re-ask current question
+  // But NOT in start/name_phone/email_opt — those need direct answers, not KB lookups
+  if (
+    !['start', 'name_phone', 'email_opt'].includes(currentPhase) &&
+    (/\?$/.test(t) || /^(kenapa|mengapa|apa|bagaimana|bila|macam mana|boleh terang|why|what|how|when|can you explain)\b/.test(t))
+  ) {
+    return 'question';
+  }
+
+  return 'direct_answer';
 }
 
-// ── Language detection ────────────────────────────────────────────────
-function detectLanguage(text: string): 'ms' | 'en' {
-  const msWords = /\b(saya|anda|yang|untuk|dengan|tidak|ada|boleh|ini|itu|dan|atau|kepada|dari|dalam|pada|akan|sudah|pernah|juga|lebih|perlu|kami|kita|awak|dia|mereka|sebab|kerana|tetapi|tapi|macam|mana|bila|kalau|jika|dah|lah|kan|la|nak|bagi|oleh)\b/gi;
-  const matches = text.match(msWords);
-  return matches && matches.length >= 2 ? 'ms' : 'en';
+// ── Base context builder — injected into every agent's system prompt ─────────
+
+function buildBaseContext(ctx: ContextBundle): string {
+  const personalityGuide = {
+    PROFESSIONAL: 'You are professional, polite, and concise.',
+    SOFT: 'You are warm, empathetic, and gentle in tone.',
+    STRICT: 'You are direct, no-nonsense, and efficient.',
+  }[ctx.personality] ?? 'You are professional, polite, and concise.';
+
+  let prompt = `You are Donna, pembantu peribadi AI Peguam ${ctx.lawyerName}.
+${personalityGuide}
+You speak primarily in Malay (Bahasa Melayu), but if the client replies in English, respond in English. NEVER mix languages in a single message (no Rojak).
+You must NEVER give legal advice. You are an intake assistant only — collect information and guide the client.
+Always address the client as "awak" (not "anda" which is too formal).
+
+IMPORTANT RULES:
+- If the client sends gibberish, nonsense, or random characters, gently ask them to clarify.
+- If the client expresses uncertainty ("tak pasti", "tak tahu", "not sure"), be empathetic and guide with simpler questions.
+- If the client asks a question about the lawyer's services, answer it briefly using the context below, then return to the current intake task.
+- Keep responses concise — 2-4 sentences max unless listing items.
+- Never fabricate information about the lawyer or firm.
+
+=== {DIGITAL CARD} ===
+Lawyer: ${ctx.lawyerName}${ctx.position ? `, ${ctx.position}` : ''}
+Firm: ${ctx.firmName}
+Status: ${ctx.lawyerStatus}${ctx.practiceAreas.length > 0 ? `\nPractice Areas: ${ctx.practiceAreas.join(', ')}` : ''}`;
+
+  if (ctx.soalanAsal) {
+    prompt += `\n\n=== {SOALAN ASAL} — Original FB Question (Source of Truth — anchor all responses to this) ===\n${ctx.soalanAsal}`;
+  }
+
+  if (ctx.jawapanPeguam) {
+    prompt += `\n\n=== {JAWAPAN PEGUAM} — Lawyer's Initial Advice (context only, do NOT repeat verbatim to client) ===\n${ctx.jawapanPeguam}`;
+  }
+
+  if (ctx.kbContext) {
+    prompt += `\n\n=== {DONNA AI CONFIG} — Lawyer's Knowledge Base ===\n${ctx.kbContext}`;
+  }
+
+  if (ctx.deflectPatterns.length > 0) {
+    prompt += `\n\nDeflect if client mentions: ${ctx.deflectPatterns.join(', ')}`;
+  }
+
+  const svcParts: string[] = [];
+  if (ctx.waktuOperasi) svcParts.push(`Operating hours: ${ctx.waktuOperasi}`);
+  if (ctx.modKonsultasi) svcParts.push(`Consultation mode: ${ctx.modKonsultasi}`);
+  if (ctx.yuranKonsultasi) svcParts.push(`Consultation fee: RM${ctx.yuranKonsultasi}`);
+  if (ctx.yuranKecemasan) svcParts.push(`Emergency fee: RM${ctx.yuranKecemasan}`);
+  if (ctx.yuranVideoMeeting) svcParts.push(`Video meeting fee: RM${ctx.yuranVideoMeeting}`);
+  if (ctx.yuranMeetingFizikal) svcParts.push(`In-person meeting fee: RM${ctx.yuranMeetingFizikal}`);
+  if (ctx.negeriOperasi) svcParts.push(`Operating state: ${ctx.negeriOperasi}`);
+  if (ctx.emelPertanyaan) svcParts.push(`Inquiry email: ${ctx.emelPertanyaan}`);
+  if (svcParts.length > 0) {
+    prompt += `\n\n=== {LEGAL SERVICE CONFIG} ===\n${svcParts.join('\n')}`;
+  }
+
+  return prompt;
 }
 
-// ── Q3/Q4 vetting helpers ─────────────────────────────────────────────
+// ── Correction pivot handler ────────────────────────────────────────────────
+// When the user says the recommended documents/area is wrong, pivot to the
+// correct area derived from Soalan Asal (not from what the client previously said).
 
-/** True when user input reads like a question rather than a direct answer */
-function isClientQuestion(text: string): boolean {
-  return /\?|apa(kah)?|bagaimana|boleh ke|berapa|macam mana|bila(kah)?|adakah|how|what|when|where|can i|is it|do i|will|how much|does|are there|kenapa|why|siapa|who/i.test(text);
+function buildCorrectionPrompt(baseCtx: string, soalanAsal: string | null): string {
+  const guardrail = buildAntiHallucinationGuardrail(soalanAsal);
+  return `${baseCtx}
+
+--- CORRECTION HANDLER ---
+The client has indicated that a previous document recommendation or practice area classification was WRONG.
+This is a critical correction event.
+
+${guardrail}
+
+INSTRUCTIONS:
+1. Acknowledge the correction warmly: "Maaf, saya tersilap faham."
+2. Re-read the {SOALAN ASAL} above carefully to identify the correct practice area.
+3. State the correct practice area clearly.
+4. Provide the correct WHITELIST documents for this case.
+5. Ask the client to confirm the corrected document list.
+Do NOT repeat the wrong information. Do NOT advance the intake phase.`;
 }
 
-/**
- * True when user has given a proper Q3 answer:
- * contains a time indicator OR a consultation mode.
- */
-function hasConsultationAnswer(text: string): boolean {
-  const hasTime = /pagi|petang|malam|morning|afternoon|evening|isnin|selasa|rabu|khamis|jumaat|sabtu|ahad|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jam\s*\d|pukul|\d\s*:\s*\d\d|\d\s*am|\d\s*pm|next week|minggu depan|esok|tomorrow|hari ini|today|weekday|weekend|hujung minggu/i.test(text);
-  const hasMode = /telefon|phone|call|video|zoom|google meet|teams|bersemuka|in.person|face.to.face|online|virtual|whatsapp|wechat/i.test(text);
-  return hasTime || hasMode;
+// ── Agent prompt builders ───────────────────────────────────────────────────
+
+function agentANamePhonePrompt(baseCtx: string, collected: Record<string, string | null>): string {
+  const have = formatCollected(collected);
+  return `${baseCtx}
+
+--- AGENT A: INTAKE — COLLECTING NAME & PHONE ---
+Your current task: Collect the client's full name and phone number.
+
+INSTRUCTIONS:
+- Extract the name (≥2 characters) and Malaysian phone number (format: 01X-XXXXXXX or +60XXXXXXXXX).
+- If you can identify BOTH, respond with this on the first line (before your message):
+  EXTRACTED: name=<name>|phone=<phone>
+  Then write a friendly confirmation and ask for their email.
+- If you CANNOT find both, ask again with an example.
+${have}`;
 }
 
-/**
- * True when user has given a proper Q4 urgency answer (yes/no variant).
- */
-function hasUrgencyAnswer(text: string): boolean {
-  return /\bya\b|\byes\b|\btidak\b|\bno\b|\bnope\b|\burgent\b|\burgency\b|\bkecemasan\b|\bstandard\b|\bbiasa\b|\bnormal\b|\bsegera\b|\bcepat\b|\bnot urgent\b|\btunggu\b|\bwait\b|\blambat\b/i.test(text);
+function agentAEmailPrompt(baseCtx: string, collected: Record<string, string | null>): string {
+  const have = formatCollected(collected);
+  return `${baseCtx}
+
+--- AGENT A: INTAKE — COLLECTING EMAIL ---
+Your current task: Collect the client's email (optional — they can type "skip").
+
+INSTRUCTIONS:
+- If valid email found: EXTRACTED: email=<email>  then acknowledge and transition to case questions.
+- If "skip" or no email wanted: EXTRACTED: email=skip  then acknowledge and transition.
+- If neither, gently re-ask.
+${have}`;
 }
 
-/**
- * Build a contextual FAQ answer using lawyer profile + service config + donna KB.
- * Returns the answer + mandatory outro + the repeat question for the current step.
- */
-function buildFAQAnswer(
-  question: string,
-  svc: Record<string, any> | null,
-  donna: Record<string, any> | null,
-  lawyerName: string,
-  lang: 'ms' | 'en',
-  repeatQ: string,
-): string {
-  const lower = question.toLowerCase();
+function agentAQ1Prompt(baseCtx: string, collected: Record<string, string | null>): string {
+  const have = formatCollected(collected);
+  return `${baseCtx}
 
-  const isFeeQ    = /yuran|fee|bayar|berapa|cost|price|charge|how much|percuma|free|rm\s*\d|ringgit/i.test(lower);
-  const isHoursQ  = /waktu|jam|bila|hours|time|when.*available|pukul|hari bekerja|working day|operating/i.test(lower);
-  const isAreaQ   = /negeri|state|area|location|kawasan|mana|where.*office|where.*based/i.test(lower);
-  const isModeQ   = /telefon|phone|video|zoom|bersemuka|physical|in.person|online|mode.*konsult/i.test(lower);
+--- AGENT A: INTAKE — CASE ASSESSMENT ---
+Your current task: Ask probing follow-up questions about the client's legal issue.
 
-  let answer = '';
+INSTRUCTIONS:
+- Read the {SOALAN ASAL} carefully and identify the legal category (strata/property/employment/criminal/family/contract).
+- Ask 2-3 specific follow-up questions relevant to THAT category. Do NOT ask about the wrong category.
+- When the client provides a substantive answer, respond with:
+  EXTRACTED: issue_details=<brief 1-sentence summary of the issue>
+  Then transition to document recommendations.
+- End every first message with: "Jangan risau, awak boleh terangkan dalam bahasa Inggeris atau Melayu."
+${have}`;
+}
 
-  if (isFeeQ) {
-    const parts: string[] = [];
-    if (lang === 'ms') {
-      if (svc?.modKonsultasi === 'PERCUMA') {
-        parts.push(`Konsultasi awal dengan ${lawyerName} adalah **PERCUMA**.`);
-      } else if (svc?.yuranKonsultasi) {
-        parts.push(`Yuran konsultasi standard adalah **RM${svc.yuranKonsultasi}**.`);
+function agentBTriagePrompt(baseCtx: string, collected: Record<string, string | null>, soalanAsal: string | null): string {
+  const have = formatCollected(collected);
+  const guardrail = buildAntiHallucinationGuardrail(soalanAsal);
+  return `${baseCtx}
+
+--- AGENT B: TRIAGE — DOCUMENT RECOMMENDATIONS ---
+Your current task: Recommend specific documents the client should prepare.
+
+${guardrail}
+
+ADDITIONAL DOCUMENT GUIDANCE:
+- For strata issues: Borang 28, written complaints to JMB/MC, photos of damage, repair receipts.
+- For property issues: SPA, title documents, payment receipts, developer correspondence.
+- For employment issues: employment contract, termination letter, payslips, warning letters.
+- For criminal issues: police report, evidence of ownership, IO communications.
+- For family issues: marriage certificate, court orders, asset documents.
+- For debt/contract: original contract, payment receipts, bank statements, demand letter.
+
+INSTRUCTIONS:
+- List 4-6 documents. Be precise — use the WHITELIST above.
+- After listing, tell the client to type "ok" when ready or ask questions.
+- When client says "ok" or acknowledges: EXTRACTED: docs_acknowledged=true
+  Then mention the lawyer's inquiry email (if in service config) and transition to consultation preferences.
+- If client asks about a BLACKLIST document, redirect to the correct whitelist items.
+${have}`;
+}
+
+function agentCQ3Prompt(baseCtx: string, collected: Record<string, string | null>): string {
+  const have = formatCollected(collected);
+  return `${baseCtx}
+
+--- AGENT C: MARKET — CONSULTATION PREFERENCE ---
+Your current task: Find out the client's preferred consultation mode.
+
+Options to present:
+• 📞 Panggilan telefon (Phone call)
+• 💻 Mesyuarat video (Video meeting)
+• 🏢 Temujanji bersemuka (In-person appointment)
+
+INSTRUCTIONS:
+- Ask about preferred mode and availability.
+- When client picks a mode: EXTRACTED: consultation=<their preference>
+  Then transition to urgency assessment.
+- If client asks about fees, answer from {LEGAL SERVICE CONFIG} then re-ask.
+${have}`;
+}
+
+function agentCQ4Prompt(baseCtx: string, collected: Record<string, string | null>): string {
+  const have = formatCollected(collected);
+  return `${baseCtx}
+
+--- AGENT C: MARKET — URGENCY ASSESSMENT ---
+Your current task: Determine if the client needs urgent handling.
+
+INSTRUCTIONS:
+- Ask if the client needs urgent handling or standard timeline.
+- Present two options:
+  • Ya — Saya perlukan ini secepat mungkin
+  • Tidak — Tempoh standard adalah baik
+- If urgent: EXTRACTED: urgency=urgent
+- If standard: EXTRACTED: urgency=standard
+- After extracting, transition to final remarks.
+${have}`;
+}
+
+function agentDSummaryPrompt(baseCtx: string, collected: Record<string, string | null>, caseRef: string | null): string {
+  const have = formatCollected(collected);
+  return `${baseCtx}
+
+--- AGENT D: SUMMARISER — FINAL REMARKS & WRAP-UP ---
+Your current task: Ask for final remarks, then close the session.
+
+INSTRUCTIONS:
+- If first message in this phase: "Adakah ada lagi yang awak ingin peguam tahu? (Taip 'tiada' jika tiada)"
+- When client provides remarks or says "tiada"/"none": EXTRACTED: remarks=<remarks or "none">
+  Then write a warm closing:
+  - Thank the client by name
+  - Confirm their enquiry has been recorded${caseRef ? `\n  - Include case reference: ${caseRef}` : ''}
+  - Tell them the lawyer will respond within 5 working days
+  - Remind them to gather the recommended documents
+${have}`;
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function formatCollected(collected: Record<string, string | null>): string {
+  const entries = Object.entries(collected).filter(([, v]) => v !== null && v !== undefined);
+  if (entries.length === 0) return '';
+  return `\nAlready collected:\n${entries.map(([k, v]) => `${k}: ${v}`).join('\n')}`;
+}
+
+function parseExtraction(response: string): {
+  extracted: Record<string, string> | null;
+  cleanMessage: string;
+} {
+  const lines = response.split('\n');
+  const extracted: Record<string, string> = {};
+  const messageLines: string[] = [];
+  let hasExtraction = false;
+
+  for (const line of lines) {
+    const match = line.match(/^EXTRACTED:\s*(.+)$/);
+    if (match) {
+      hasExtraction = true;
+      for (const pair of match[1].split('|')) {
+        const eq = pair.indexOf('=');
+        if (eq > 0) {
+          extracted[pair.substring(0, eq).trim()] = pair.substring(eq + 1).trim();
+        }
       }
-      if (svc?.yuranVideoMeeting)       parts.push(`Video meeting: **RM${svc.yuranVideoMeeting}**`);
-      if (svc?.yuranMeetingFizikal)     parts.push(`Temujanji bersemuka: **RM${svc.yuranMeetingFizikal}**`);
-      if (svc?.yuranKecemasan)          parts.push(`Yuran kecemasan: **RM${svc.yuranKecemasan}**`);
-      if (!parts.length) parts.push(`Sila hubungi ${lawyerName} terus untuk maklumat yuran terkini.`);
     } else {
-      if (svc?.modKonsultasi === 'PERCUMA') {
-        parts.push(`Initial consultation with ${lawyerName} is **FREE**.`);
-      } else if (svc?.yuranKonsultasi) {
-        parts.push(`Standard consultation fee is **RM${svc.yuranKonsultasi}**.`);
-      }
-      if (svc?.yuranVideoMeeting)       parts.push(`Video meeting: **RM${svc.yuranVideoMeeting}**`);
-      if (svc?.yuranMeetingFizikal)     parts.push(`In-person appointment: **RM${svc.yuranMeetingFizikal}**`);
-      if (svc?.yuranKecemasan)          parts.push(`Emergency fee: **RM${svc.yuranKecemasan}**`);
-      if (!parts.length) parts.push(`Please contact ${lawyerName} directly for the latest fee information.`);
+      messageLines.push(line);
     }
-    answer = parts.join('\n');
-
-  } else if (isHoursQ) {
-    const hours = svc?.waktuOperasi ?? null;
-    answer = lang === 'ms'
-      ? (hours ? `${lawyerName} beroperasi pada **${hours}**.` : `Sila hubungi ${lawyerName} terus untuk mengesahkan waktu operasi.`)
-      : (hours ? `${lawyerName} operates on **${hours}**.` : `Please contact ${lawyerName} directly to confirm operating hours.`);
-
-  } else if (isAreaQ) {
-    const negeri = svc?.negeriOperasi ?? null;
-    answer = lang === 'ms'
-      ? (negeri ? `${lawyerName} beroperasi terutamanya di **${negeri}**.` : `Sila hubungi ${lawyerName} untuk mengetahui kawasan operasi.`)
-      : (negeri ? `${lawyerName} operates primarily in **${negeri}**.` : `Please contact ${lawyerName} to find out their operating area.`);
-
-  } else if (isModeQ) {
-    const hasFee = svc?.yuranVideoMeeting || svc?.yuranMeetingFizikal;
-    answer = lang === 'ms'
-      ? `${lawyerName} menerima konsultasi melalui telefon, video meeting, dan temujanji bersemuka.${hasFee ? ` Yuran mungkin berbeza mengikut mod yang dipilih.` : ''}`
-      : `${lawyerName} accepts consultations via phone, video meeting, and in-person appointment.${hasFee ? ` Fees may vary by mode.` : ''}`;
-
-  } else if (donna?.kbContext) {
-    // Fallback: use donna knowledge base
-    const kb = (donna.kbContext as string).substring(0, 300);
-    answer = lang === 'ms'
-      ? `Berdasarkan maklumat yang saya ada: ${kb}${kb.length >= 300 ? '...' : ''}`
-      : `Based on the information I have: ${kb}${kb.length >= 300 ? '...' : ''}`;
-
-  } else {
-    answer = lang === 'ms'
-      ? `Saya tidak mempunyai maklumat spesifik tentang itu. Awak boleh tanya peguam terus semasa konsultasi.`
-      : `I don't have specific information on that. You may ask the lawyer directly during consultation.`;
   }
 
-  const outro = lang === 'ms'
-    ? `Sebarang soalan khusus saya mohon ajukan kepada peguam.`
-    : `For any specific questions, please ask the lawyer directly.`;
-
-  return `${answer}\n\n${outro}\n\n---\n\n${repeatQ}`;
+  const raw = messageLines.join('\n').trim();
+  const cleanMessage = raw.replace(/\*\*(.+?)\*\*/g, '$1').replace(/\*(.+?)\*/g, '$1');
+  return {
+    extracted: hasExtraction ? extracted : null,
+    cleanMessage,
+  };
 }
 
-/**
- * POST /api/donna-chat
- *
- * Intake flow (applies to both bridge and digital card):
- *   start → name_phone → email_opt → q1 → q2 → q3 → q4 → q5 → done
- *
- *   start      : Initial greeting, transitions to 'name_phone'
- *   name_phone : Collect full name + phone in one message
- *   email_opt  : Collect email (optional, "skip" allowed) — Malay
- *   q1         : Context-aware probing questions (Malay) — detects reply language
- *   q2         : Document recommendations (lang-aware)
- *   q3         : Share docs to lawyer email + case ref + consultation preference (lang-aware)
- *   q4         : Emergency / sooner appointment option (lang-aware)
- *   q5         : Final remarks — wrap up and submit (lang-aware)
- */
+function buildConversationHistory(
+  transcript: unknown[]
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  if (!Array.isArray(transcript)) return [];
+  return transcript
+    .filter((t: any) => t.role === 'user' || t.role === 'assistant')
+    .map((t: any) => ({ role: t.role as 'user' | 'assistant', content: t.content }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/donna-chat
+//
+// Body: { slug, bridgeId, userInput? }
+// The `step`/phase is NEVER accepted from the client — always loaded from DB.
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { slug, step, userInput, collected = {}, bridgeId, bridgeQuestion, initialGreeting } = body;
+    const { slug, bridgeId, userInput, initialGreeting } = body;
 
     if (!slug) {
       return NextResponse.json({ error: 'slug required' }, { status: 400 });
     }
+    if (!bridgeId) {
+      return NextResponse.json({ error: 'bridgeId required' }, { status: 400 });
+    }
 
-    // ── Load profile (full service config + donna config for FAQ handling) ──
-    const profile = await db.lawyerProfile.findUnique({
-      where: { slug },
-      select: {
-        id: true,
-        firmName: true,
-        position: true,
-        bio: true,
-        donnaConfig: {
-          select: { personality: true, kbContext: true, triageRules: true },
-        },
-        legalServiceConfig: {
-          select: {
-            emelPertanyaan: true,
-            waktuOperasi: true,
-            modKonsultasi: true,
-            yuranKonsultasi: true,
-            yuranKecemasan: true,
-            yuranVideoMeeting: true,
-            yuranVideoMeetingKecemasan: true,
-            yuranMeetingFizikal: true,
-            yuranMeetingFizikalKecemasan: true,
-            negeriOperasi: true,
-          },
-        },
-        user: { select: { email: true, name: true } },
-      },
-    });
+    // ── 1. Load server-authoritative bridge state ─────────────────────────
+    const bridgeState = await getBridgeChatState(bridgeId);
+    if (!bridgeState) {
+      return NextResponse.json({ error: 'Bridge not found' }, { status: 404 });
+    }
+    if (bridgeState.status !== 'ACTIVE') {
+      return NextResponse.json({ error: `Bridge is ${bridgeState.status}` }, { status: 410 });
+    }
 
-    if (!profile) {
+    // The phase comes from the server — NEVER from the client
+    const currentPhase = bridgeState.chatPhase as ChatPhase;
+    const extractedSoFar = bridgeState.extractedEntities as Record<string, string | null>;
+
+    // Already done — do nothing
+    if (currentPhase === 'done') {
+      return NextResponse.json({ message: 'Sesi telah tamat. Terima kasih!', nextStep: 'done', done: true });
+    }
+
+    // ── 2. Build context bundle (all 4 context sources) ───────────────────
+    const ctx = await buildContextBundle(slug, bridgeId);
+    if (!ctx) {
       return NextResponse.json({ error: 'Profile not found' }, { status: 404 });
     }
 
-    const firmName    = profile.firmName ?? 'firma guaman ini';
-    const lawyerEmail = (profile.legalServiceConfig as any)?.emelPertanyaan
-      || profile.user?.email
-      || null;
+    const lawyerName = ctx.lawyerName;
+    const lawyerEmail = ctx.emelPertanyaan;
 
-    // ── Persistence: hydrate transcript length, append user turn ──
-    // Server-authoritative transcript — the chat log lives in DonnaBridge.chatTranscript,
-    // not in client-side `collected`. This survives browser refresh.
+    // ── 3. Load chat transcript for conversation history ──────────────────
+    let conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
     let baseTurnIndex = 0;
-    if (bridgeId) {
+
+    try {
+      const b = await db.donnaBridge.findUnique({
+        where: { id: bridgeId },
+        select: { chatTranscript: true, shortCode: true },
+      });
+      if (b) {
+        const transcript = Array.isArray(b.chatTranscript) ? b.chatTranscript : [];
+        baseTurnIndex = transcript.length;
+        conversationHistory = buildConversationHistory(transcript);
+      }
+    } catch (e) {
+      console.error('[donna-chat] transcript hydrate failed:', e);
+    }
+
+    // Case ref
+    let caseRef: string | null = null;
+    try {
+      const b = await db.donnaBridge.findUnique({ where: { id: bridgeId }, select: { shortCode: true } });
+      caseRef = b?.shortCode ?? null;
+    } catch { /* non-fatal */ }
+
+    // ── 4. Append user turn to transcript BEFORE calling Claude ──────────
+    if (userInput) {
       try {
-        const b = await db.donnaBridge.findUnique({
-          where: { id: bridgeId },
-          select: { chatTranscript: true, status: true },
-        });
-        if (b?.status === 'ACTIVE') {
-          baseTurnIndex = Array.isArray(b.chatTranscript) ? b.chatTranscript.length : 0;
-          // Append user turn (skip 'start' — no user input yet)
-          if (userInput && step !== 'start') {
-            try {
-              await appendTurn(bridgeId, {
-                role: 'user',
-                content: userInput,
-                turnIndex: baseTurnIndex,
-              });
-              baseTurnIndex += 1;
-            } catch (e) {
-              console.error('[donna-chat] appendTurn(user) failed:', e);
-            }
-          }
-        }
+        await appendTurn(bridgeId, { role: 'user', content: userInput, turnIndex: baseTurnIndex });
+        baseTurnIndex += 1;
+        await incrementAgentTurnCount(bridgeId);
       } catch (e) {
-        console.error('[donna-chat] transcript hydrate failed:', e);
+        console.error('[donna-chat] appendTurn(user) failed:', e);
       }
     }
 
-    // Case reference: use bridge shortCode if available, else last 8 chars of bridgeId
-    let caseRef = bridgeId ? bridgeId.slice(-8).toUpperCase() : null;
-    if (bridgeId) {
-      try {
-        const bridge = await db.donnaBridge.findUnique({
-          where: { id: bridgeId },
-          select: { shortCode: true },
-        });
-        if (bridge?.shortCode) caseRef = bridge.shortCode;
-      } catch { /* non-fatal */ }
-    }
+    // ── 5. Think-Then-Act intent classification ───────────────────────────
+    // Before routing to any agent, classify the user's intent.
+    // 'correction' → pivot without advancing phase
+    // 'question'   → answer from KB, re-ask same question, do NOT advance phase
+    // 'off_topic'  → ask for clarification, do NOT advance phase
+    // 'direct_answer' → route to current agent normally
 
-    // ── State machine ────────────────────────────────────────────
-    let message    = '';
-    let nextStep   = step;
-    let updatedCollected = { ...collected };
-    let done       = false;
+    const baseCtx = buildBaseContext(ctx);
+    let message = '';
+    let nextStep: ChatPhase = currentPhase;
+    let updatedCollected = { ...extractedSoFar };
+    let done = false;
     let inquiryId: string | undefined;
+    let advancePhase = true; // set to false to hold current phase
 
-    switch (step) {
+    if (userInput && currentPhase !== 'start') {
+      const intent = classifyIntent(userInput, currentPhase);
 
-      // ── INITIAL GREETING ──────────────────────────────────────
-      case 'start': {
-        if (initialGreeting) {
-          message = initialGreeting;
-        } else {
-          const lawyerDisplayName = profile.user?.name ?? null;
-          const nameClause = lawyerDisplayName
-            ? `pembantu digital Peguam ${lawyerDisplayName} bagi Firma ${firmName}`
-            : `pembantu digital ${firmName}`;
-          message = `Hi, Selamat Datang!\nSaya Donna, ${nameClause}.\n\nBoleh saya dapatkan nama penuh dan nombor telefon awak?`;
-        }
-        nextStep = 'name_phone';
-        break;
+      if (intent === 'correction') {
+        // Anti-Hallucination pivot — do NOT advance phase
+        const correctionPrompt = buildCorrectionPrompt(baseCtx, ctx.soalanAsal);
+        message = await callClaude(correctionPrompt, conversationHistory, userInput, 500);
+        advancePhase = false;
+        nextStep = currentPhase;
+      } else if (intent === 'question') {
+        // Answer from KB, re-ask current question — do NOT advance phase
+        const kbPrompt = `${baseCtx}
+
+--- OFF-SCRIPT QUESTION HANDLER ---
+The client has asked a question instead of answering the intake prompt.
+INSTRUCTIONS:
+1. Answer the client's question briefly using {DONNA AI CONFIG} and {LEGAL SERVICE CONFIG} above.
+2. After your answer, re-ask the same intake question you were on — use this exact phrase:
+   "Kembali kepada soalan tadi — [re-state the current intake question concisely]"
+Do NOT advance to the next intake step. The phase stays at: ${currentPhase}`;
+        message = await callClaude(kbPrompt, conversationHistory, userInput, 500);
+        advancePhase = false;
+        nextStep = currentPhase;
+      } else if (intent === 'off_topic') {
+        message = 'Maaf, saya tidak faham. Boleh awak cuba terangkan semula?';
+        advancePhase = false;
+        nextStep = currentPhase;
       }
+    }
 
-      // ── STEP 1: NAME + PHONE (combined) ───────────────────────
-      case 'name_phone': {
-        const raw = (userInput ?? '').trim();
-        const phoneMatch = raw.match(/(\+?60|0)\d{8,10}/);
-        if (!phoneMatch) {
-          message = 'Sila berikan nama penuh dan nombor telefon awak. Contoh: Sharifah Adila 0123456789';
-          nextStep = 'name_phone';
-          break;
-        }
-        const phone = phoneMatch[0];
-        const name  = raw.replace(phone, '').replace(/[,;]/g, '').trim();
-        if (!name || name.length < 2) {
-          message = 'Sila berikan nama penuh dan nombor telefon awak. Contoh: Sharifah Adila 0123456789';
-          nextStep = 'name_phone';
-          break;
-        }
-        updatedCollected.clientName  = name;
-        updatedCollected.clientPhone = phone;
-        message = `Baik! Boleh saya dapatkan alamat emel awak juga? (Taip "skip" jika awak tidak mahu berkongsi)`;
-        nextStep = 'email_opt';
-        break;
-      }
+    // ── 6. Route to current agent (only if not already handled above) ─────
+    if (advancePhase) {
+      switch (currentPhase) {
 
-      // ── STEP 3: EMAIL (OPTIONAL) ──────────────────────────────
-      case 'email_opt': {
-        const emailInput = (userInput ?? '').trim().toLowerCase();
-        const skip       = emailInput === 'skip' || emailInput === '';
-        const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput);
-
-        if (!skip && !validEmail) {
-          message = 'Sila masukkan alamat emel yang sah, atau taip "skip" untuk meneruskan. Terima kasih!';
-          nextStep = 'email_opt';
-          break;
-        }
-
-        updatedCollected.clientEmail = skip ? null : emailInput;
-
-        // Issue context: from bridgeQuestion (bridge) or collected (digital card)
-        const issueContext = bridgeQuestion ?? updatedCollected.issueSummary ?? '';
-        message = generateProbingQuestions(issueContext);
-        nextStep = 'q1';
-        break;
-      }
-
-      // ── Q1: USER ANSWERS PROBING QUESTIONS ───────────────────
-      case 'q1': {
-        const answer = (userInput ?? '').trim();
-        if (!answer || answer.length < 10) {
-          message = 'Sila berikan maklumat lebih lanjut untuk membantu peguam menilai kes awak. Cuba jawab semua soalan di atas.';
-          nextStep = 'q1';
-          break;
-        }
-        updatedCollected.issueSummary = answer;
-
-        // Detect language from user's reply and persist for remaining steps
-        const detectedLang = detectLanguage(answer);
-        updatedCollected._lang = detectedLang;
-
-        // Generate document recommendations based on issue context
-        const issueForDocs = bridgeQuestion ?? answer;
-        message = generateDocumentRecommendations(issueForDocs, detectedLang);
-        nextStep = 'q2';
-        break;
-      }
-
-      // ── Q2: USER ACKNOWLEDGES DOCUMENTS OR ASKS QUESTION ──────
-      case 'q2': {
-        const userResponse = (userInput ?? '').trim().toLowerCase();
-        const lang2 = (collected._lang ?? 'ms') as 'ms' | 'en';
-
-        // Check if user typed "ok" or just confirmed
-        if (userResponse === 'ok') {
-          // User confirmed documents, move to q3
-          updatedCollected.docsAcknowledged = true;
-          const emailLine = lawyerEmail
-            ? `📧 **${lawyerEmail}**`
-            : lang2 === 'ms'
-              ? `📧 *(sila hubungi peguam terus)*`
-              : `📧 *(please contact the lawyer directly)*`;
-
-          const refLine = caseRef
-            ? lang2 === 'ms'
-              ? `Sila nyatakan **Rujukan Kes: ${caseRef}** dalam subjek emel awak.`
-              : `Please include **Case Reference: ${caseRef}** in your email subject.`
-            : ``;
-
-          message = lang2 === 'ms'
-            ? [
-                `Apabila awak telah mengumpulkan dokumen, awak boleh menghantarnya terus kepada peguam di:`,
-                ``,
-                emailLine,
-                refLine,
-                ``,
-                `Ini akan membantu peguam menyemak kes awak sebelum konsultasi.`,
-                ``,
-                `Sekarang, bila awak ada masa untuk berunding? Dan apakah mod pilihan awak:`,
-                `• 📞 Panggilan telefon`,
-                `• 💻 Mesyuarat video`,
-                `• 🏢 Temujanji bersemuka`,
-              ].filter(l => l !== undefined).join('\n')
-            : [
-                `When you have gathered your documents, you may send them directly to the lawyer at:`,
-                ``,
-                emailLine,
-                refLine,
-                ``,
-                `This will help the lawyer review your case before your consultation.`,
-                ``,
-                `Now, when are you available to consult? And what is your preferred mode:`,
-                `• 📞 Phone call`,
-                `• 💻 Video meeting`,
-                `• 🏢 In-person appointment`,
-              ].filter(l => l !== undefined).join('\n');
-          nextStep = 'q3';
-        } else {
-          const originalQuestion = bridgeQuestion ?? collected.issueSummary ?? '';
-
-          // ── SELF-CORRECTION: user signals documents are wrong category ──
-          // Patterns: "takde agreement", "kes jenayah", "wrong docs", "this is criminal", etc.
-          const isWrongCategorySignal = /takde agreement|tiada agreement|tiada kontrak|no agreement|no contract|ini kes jenayah|this is criminal|kes curi|kes pecah rumah|wrong doc|salah dokumen|bukan kontrak|bukan perjanjian|criminal case|theft case|stolen|robbery|kes rompak|not a contract/i.test(userResponse);
-
-          if (isWrongCategorySignal) {
-            // Re-run doc generation using the original bridge question so the correct
-            // category (criminal, employment, etc.) is detected from source-of-truth text.
-            const correctedDocs = generateDocumentRecommendations(originalQuestion, lang2);
-
-            const apology = lang2 === 'ms'
-              ? `Minta maaf atas kekeliruan itu. Awak betul — saya telah salah kenal pasti kategori kes awak.\n\nMemandangkan Soalan Asal awak adalah berkaitan "${originalQuestion.substring(0, 70)}...", berikut adalah senarai dokumen yang lebih tepat:`
-              : `I apologise for the confusion. You are right — I misidentified the category of your case.\n\nGiven that your original question is about "${originalQuestion.substring(0, 70)}...", here is the corrected document list:`;
-
-            // Strip the preamble from correctedDocs so we can inject the apology before it
-            const docBody = correctedDocs.replace(/^.*?:\n\n/, '').replace(/\n\nSila cari.*$/, '').replace(/\n\nPlease locate.*$/, '');
-            const docOutro = lang2 === 'ms'
-              ? `\n\nSila cari dan sediakan dokumen-dokumen ini. Taip "ok" atau tanya jika ada pertanyaan lanjut.`
-              : `\n\nPlease locate and prepare these. Type "ok" or ask if you have further questions.`;
-
-            message  = `${apology}\n\n${docBody}${docOutro}`;
-            nextStep = 'q2'; // Stay at q2 so user can acknowledge the corrected list
-            break;
-          }
-
-          // ── NORMAL Q2 FAQ: answer ONE question, auto-move to q3 ──
-          let answerText = '';
-
-          if (userResponse.length > 0) {
-            if (/asal|original|fotokopi|copy|gambar|image|scan/.test(userResponse)) {
-              answerText = lang2 === 'ms'
-                ? `Boleh, salinan digital atau gambar dokumen yang jelas sudah memadai untuk penilaian awal peguam. Seperti dalam Jawapan Peguam tadi, dokumen ini penting bagi mengesahkan konteks dalam Soalan Asal awak tentang "${originalQuestion.substring(0, 60)}...".\n\nSebarang soalan khusus saya mohon ajukan kepada peguam.`
-                : `Yes, a clear digital copy or photo of the document is acceptable for the lawyer's initial assessment. As mentioned in the lawyer's previous response, this document is important for confirming the context of your original question about "${originalQuestion.substring(0, 60)}...".\n\nFor any specific questions, please ask the lawyer directly.`;
+        // ── START: deterministic greeting, no LLM needed ──────────────────
+        case 'start': {
+          // If userInput is present, the bridge page already showed the greeting
+          // statically and the user is responding to it — skip the greeting and
+          // process directly as name_phone (race guard against the page-level advance).
+          if (userInput) {
+            await updateChatPhase(bridgeId, 'name_phone');
+            const prompt = agentANamePhonePrompt(baseCtx, updatedCollected);
+            const raw = await callClaude(prompt, conversationHistory, userInput);
+            const { extracted, cleanMessage } = parseExtraction(raw);
+            message = cleanMessage;
+            if (extracted?.name && extracted?.phone) {
+              updatedCollected.clientName = extracted.name;
+              updatedCollected.clientPhone = extracted.phone;
+              await mergeExtractedEntities(bridgeId, { clientName: extracted.name, clientPhone: extracted.phone });
+              nextStep = 'email_opt';
+              await updateChatPhase(bridgeId, 'email_opt');
             } else {
-              answerText = lang2 === 'ms'
-                ? `Pertanyaan awak berkaitan dokumen-dokumen untuk kes awak tentang "${originalQuestion.substring(0, 60)}...". Peguam akan memberikan panduan lebih terperinci semasa konsultasi berdasarkan dokumen yang awak sediakan.\n\nSebarang soalan khusus saya mohon ajukan kepada peguam.`
-                : `Your question is related to the documents needed for your case about "${originalQuestion.substring(0, 60)}...". The lawyer will provide more detailed guidance during the consultation based on the documents you prepare.\n\nFor any specific questions, please ask the lawyer directly.`;
+              nextStep = 'name_phone';
             }
+          } else {
+            if (initialGreeting) {
+              message = initialGreeting;
+            } else {
+              message = `Hi, Selamat Datang!\nSaya Donna, pembantu peribadi AI Peguam ${lawyerName}.\n\nBoleh saya dapatkan nama penuh dan nombor telefon awak?`;
+            }
+            nextStep = 'name_phone';
+            await updateChatPhase(bridgeId, 'name_phone');
+          }
+          break;
+        }
 
-            updatedCollected.docsAcknowledged = true;
+        // ── AGENT A: NAME + PHONE ──────────────────────────────────────────
+        case 'name_phone': {
+          const prompt = agentANamePhonePrompt(baseCtx, updatedCollected);
+          const raw = await callClaude(prompt, conversationHistory, userInput ?? '');
+          const { extracted, cleanMessage } = parseExtraction(raw);
+          message = cleanMessage;
 
-            const nextQMessage = lang2 === 'ms'
-              ? `\n\n---\n\nSekarang, bila awak ada masa untuk berunding? Dan apakah mod pilihan awak:\n• 📞 Panggilan telefon\n• 💻 Mesyuarat video\n• 🏢 Temujanji bersemuka`
-              : `\n\n---\n\nNow, when are you available to consult? And what is your preferred mode:\n• 📞 Phone call\n• 💻 Video meeting\n• 🏢 In-person appointment`;
+          if (extracted?.name && extracted?.phone) {
+            updatedCollected.clientName = extracted.name;
+            updatedCollected.clientPhone = extracted.phone;
+            await mergeExtractedEntities(bridgeId, { clientName: extracted.name, clientPhone: extracted.phone });
+            nextStep = 'email_opt';
+            await updateChatPhase(bridgeId, 'email_opt');
+          } else {
+            nextStep = 'name_phone'; // stay
+          }
+          break;
+        }
 
-            message  = answerText + nextQMessage;
+        // ── AGENT A: EMAIL ─────────────────────────────────────────────────
+        case 'email_opt': {
+          const prompt = agentAEmailPrompt(baseCtx, updatedCollected);
+          const raw = await callClaude(prompt, conversationHistory, userInput ?? '');
+          const { extracted, cleanMessage } = parseExtraction(raw);
+          message = cleanMessage;
+
+          if (extracted?.email) {
+            const email = extracted.email === 'skip' ? null : extracted.email;
+            updatedCollected.clientEmail = email;
+            await mergeExtractedEntities(bridgeId, { clientEmail: email });
+            nextStep = 'q1';
+            await updateChatPhase(bridgeId, 'q1');
+          } else {
+            nextStep = 'email_opt';
+          }
+          break;
+        }
+
+        // ── AGENT A: CASE PROBING ──────────────────────────────────────────
+        case 'q1': {
+          const prompt = agentAQ1Prompt(baseCtx, updatedCollected);
+          const raw = await callClaude(prompt, conversationHistory, userInput ?? '', 800);
+          const { extracted, cleanMessage } = parseExtraction(raw);
+          message = cleanMessage;
+
+          if (extracted?.issue_details) {
+            updatedCollected.issueDetails = extracted.issue_details;
+            await mergeExtractedEntities(bridgeId, { issueDetails: extracted.issue_details });
+            nextStep = 'q2';
+            await updateChatPhase(bridgeId, 'q2');
+          } else {
+            nextStep = 'q1';
+          }
+          break;
+        }
+
+        // ── AGENT B: TRIAGE / DOCUMENTS ───────────────────────────────────
+        case 'q2': {
+          const prompt = agentBTriagePrompt(baseCtx, updatedCollected, ctx.soalanAsal);
+          const raw = await callClaude(prompt, conversationHistory, userInput ?? '', 900);
+          const { extracted, cleanMessage } = parseExtraction(raw);
+          message = cleanMessage;
+
+          if (extracted?.docs_acknowledged) {
+            updatedCollected.docsAcknowledged = 'true';
+            await mergeExtractedEntities(bridgeId, { docsAcknowledged: 'true' });
+            nextStep = 'q3';
+            await updateChatPhase(bridgeId, 'q3');
+          } else {
+            nextStep = 'q2';
+          }
+          break;
+        }
+
+        // ── AGENT C: CONSULTATION MODE ────────────────────────────────────
+        case 'q3': {
+          const prompt = agentCQ3Prompt(baseCtx, updatedCollected);
+          const raw = await callClaude(prompt, conversationHistory, userInput ?? '');
+          const { extracted, cleanMessage } = parseExtraction(raw);
+          message = cleanMessage;
+
+          if (extracted?.consultation) {
+            updatedCollected.consultationPreference = extracted.consultation;
+            await mergeExtractedEntities(bridgeId, { consultationPreference: extracted.consultation });
+            nextStep = 'q4';
+            await updateChatPhase(bridgeId, 'q4');
+          } else {
             nextStep = 'q3';
           }
-        }
-        break;
-      }
-
-      // ── Q3: CONSULTATION PREFERENCE & AVAILABILITY ───────────
-      case 'q3': {
-        const preference = (userInput ?? '').trim();
-        const lang3 = (collected._lang ?? 'ms') as 'ms' | 'en';
-        const lawyerName3 = profile.user?.name ?? profile.firmName ?? 'peguam';
-        const svc3 = profile.legalServiceConfig as Record<string, any> | null;
-        const donna3 = profile.donnaConfig as Record<string, any> | null;
-
-        const q3Question = lang3 === 'ms'
-          ? [
-              `Bila awak ada masa untuk berunding? Dan apakah mod pilihan awak:`,
-              `• 📞 Panggilan telefon`,
-              `• 💻 Mesyuarat video`,
-              `• 🏢 Temujanji bersemuka`,
-            ].join('\n')
-          : [
-              `When are you available to consult? And what is your preferred mode:`,
-              `• 📞 Phone call`,
-              `• 💻 Video meeting`,
-              `• 🏢 In-person appointment`,
-            ].join('\n');
-
-        // Empty or too short — re-ask
-        if (!preference || preference.length < 2) {
-          message = q3Question;
-          nextStep = 'q3';
           break;
         }
 
-        // Client is asking a question — answer it then re-ask Q3
-        if (isClientQuestion(preference) || !hasConsultationAnswer(preference)) {
-          message = buildFAQAnswer(preference, svc3, donna3, lawyerName3, lang3, q3Question);
-          nextStep = 'q3';
+        // ── AGENT C: URGENCY ──────────────────────────────────────────────
+        case 'q4': {
+          const prompt = agentCQ4Prompt(baseCtx, updatedCollected);
+          const raw = await callClaude(prompt, conversationHistory, userInput ?? '');
+          const { extracted, cleanMessage } = parseExtraction(raw);
+          message = cleanMessage;
+
+          if (extracted?.urgency) {
+            updatedCollected.urgencyPreference = extracted.urgency;
+            await mergeExtractedEntities(bridgeId, { urgencyPreference: extracted.urgency });
+            nextStep = 'q5';
+            await updateChatPhase(bridgeId, 'q5');
+          } else {
+            nextStep = 'q4';
+          }
           break;
         }
 
-        // Proper consultation answer — store and advance
-        updatedCollected.consultationPreference = preference;
+        // ── AGENT D: FINAL REMARKS & WRAP-UP ──────────────────────────────
+        case 'q5': {
+          const prompt = agentDSummaryPrompt(baseCtx, updatedCollected, caseRef);
+          const raw = await callClaude(prompt, conversationHistory, userInput ?? '', 600);
+          const { extracted, cleanMessage } = parseExtraction(raw);
+          message = cleanMessage;
 
-        const urgencyQ = lang3 === 'ms'
-          ? [
-              `Faham. Satu lagi perkara — adakah awak perlukan ini diuruskan dengan segera?`,
-              ``,
-              svc3?.yuranKecemasan
-                ? `Yuran kecemasan adalah **RM${svc3.yuranKecemasan}**.`
-                : `Yuran kecemasan mungkin dikenakan untuk temujanji segera.`,
-              ``,
-              `• Ya — Saya perlukan ini secepat mungkin`,
-              `• Tidak — Tempoh standard adalah baik`,
-            ].filter(Boolean).join('\n')
-          : [
-              `Understood. One more thing — do you need this handled urgently?`,
-              ``,
-              svc3?.yuranKecemasan
-                ? `Emergency fee is **RM${svc3.yuranKecemasan}**.`
-                : `A small emergency fee may apply for urgent appointments.`,
-              ``,
-              `• Yes — I need this as soon as possible`,
-              `• No — standard timeline is fine`,
-            ].filter(Boolean).join('\n');
+          if (extracted?.remarks) {
+            updatedCollected.remarks = extracted.remarks === 'none' ? null : extracted.remarks;
+            await mergeExtractedEntities(bridgeId, { remarks: updatedCollected.remarks ?? null });
 
-        message  = urgencyQ;
-        nextStep = 'q4';
-        break;
-      }
+            const issueSummary =
+              updatedCollected.issueDetails ??
+              ctx.soalanAsal ??
+              'Inquiry submitted via Donna';
 
-      // ── Q4: EMERGENCY / URGENCY OPTION ───────────────────────
-      case 'q4': {
-        const urgency = (userInput ?? '').trim();
-        const lang4 = (collected._lang ?? 'ms') as 'ms' | 'en';
-        const lawyerName4 = profile.user?.name ?? profile.firmName ?? 'peguam';
-        const svc4 = profile.legalServiceConfig as Record<string, any> | null;
-        const donna4 = profile.donnaConfig as Record<string, any> | null;
+            // Create DonnaInquiry + send email
+            try {
+              const result = await createInquiry({
+                profileId: (await db.lawyerProfile.findUnique({ where: { slug }, select: { id: true } }))!.id,
+                clientName: updatedCollected.clientName ?? undefined,
+                clientEmail: updatedCollected.clientEmail ?? undefined,
+                clientPhone: updatedCollected.clientPhone ?? undefined,
+                practiceArea: null,
+                issueSummary,
+                transcript: JSON.stringify(updatedCollected),
+                bridgeId,
+              });
+              inquiryId = result.inquiryId;
+            } catch (e) {
+              console.error('[donna-chat q5] createInquiry error:', e);
+            }
 
-        const q4Question = lang4 === 'ms'
-          ? [
-              `Adakah awak perlukan ini diuruskan dengan segera?`,
-              ``,
-              svc4?.yuranKecemasan
-                ? `Yuran kecemasan adalah **RM${svc4.yuranKecemasan}**.`
-                : `Yuran kecemasan mungkin dikenakan untuk temujanji segera.`,
-              ``,
-              `• Ya — Saya perlukan ini secepat mungkin`,
-              `• Tidak — Tempoh standard adalah baik`,
-            ].filter(Boolean).join('\n')
-          : [
-              `Do you need this handled urgently?`,
-              ``,
-              svc4?.yuranKecemasan
-                ? `Emergency fee is **RM${svc4.yuranKecemasan}**.`
-                : `A small emergency fee may apply for urgent appointments.`,
-              ``,
-              `• Yes — I need this as soon as possible`,
-              `• No — standard timeline is fine`,
-            ].filter(Boolean).join('\n');
-
-        // Empty — re-ask
-        if (!urgency || urgency.length < 1) {
-          message  = q4Question;
-          nextStep = 'q4';
+            nextStep = 'done';
+            done = true;
+            await updateChatPhase(bridgeId, 'done');
+          } else {
+            nextStep = 'q5';
+          }
           break;
         }
 
-        // Client is asking a question — answer it then re-ask Q4
-        if (isClientQuestion(urgency) || !hasUrgencyAnswer(urgency)) {
-          message  = buildFAQAnswer(urgency, svc4, donna4, lawyerName4, lang4, q4Question);
-          nextStep = 'q4';
-          break;
+        default: {
+          message = 'Sesi ini telah tamat. Terima kasih!';
+          nextStep = 'done';
+          done = true;
         }
-
-        // Proper urgency answer — store and advance
-        updatedCollected.urgencyPreference = urgency;
-
-        message = lang4 === 'ms'
-          ? [
-              `Terima kasih kerana berkongsi semua ini.`,
-              ``,
-              `Adakah ada lagi yang awak ingin peguam tahu, atau adakah awak berpuas hati dengan apa yang telah dikongsi? Sila tinggalkan sebarang catatan atau pertanyaan tambahan di bawah.`,
-              ``,
-              `*(Taip "tiada" jika tiada yang hendak ditambah)*`,
-            ].join('\n')
-          : [
-              `Thank you for sharing all of this.`,
-              ``,
-              `Is there anything else you'd like the lawyer to know, or are you satisfied with what has been shared? Feel free to leave any additional remarks or questions below.`,
-              ``,
-              `*(Type "none" if you have nothing to add)*`,
-            ].join('\n');
-        nextStep = 'q5';
-        break;
-      }
-
-      // ── Q5: FINAL REMARKS → SUBMIT ────────────────────────────
-      case 'q5': {
-        const remarks = (userInput ?? '').trim();
-        const lang5 = (collected._lang ?? 'ms') as 'ms' | 'en';
-        updatedCollected.remarks = (remarks !== 'none' && remarks !== 'tiada') ? remarks : null;
-
-        const finalIssueSummary =
-          updatedCollected.issueSummary ?? bridgeQuestion ?? 'Inquiry submitted via Donna';
-
-        // ── Step 1: Create inquiry (non-fatal) ──
-        try {
-          const result = await createInquiry({
-            profileId:    profile.id,
-            clientName:   updatedCollected.clientName,
-            clientEmail:  updatedCollected.clientEmail,
-            clientPhone:  updatedCollected.clientPhone,
-            practiceArea: null,
-            issueSummary: finalIssueSummary,
-            transcript:   JSON.stringify(updatedCollected._transcript ?? []),
-            bridgeId:     bridgeId ?? null,
-          });
-          inquiryId = result.inquiryId;
-        } catch (submitErr) {
-          console.error('[donna-chat q5] createInquiry error:', submitErr);
-        }
-
-        // ── Step 2: bridge finalisation deferred until AFTER the assistant
-        //     turn is appended (done at bottom of handler — must happen while
-        //     status is still ACTIVE so appendTurn doesn't reject the write).
-
-        message = lang5 === 'ms'
-          ? [
-              `Terima kasih, ${updatedCollected.clientName ?? 'awak'}! Pertanyaan awak telah direkodkan.`,
-              ``,
-              `Peguam akan menyemak kes awak dan memberikan maklum balas dalam masa **5 hari bekerja**.`,
-              ``,
-              `Sementara itu, sila kumpulkan dokumen yang telah saya sebutkan dan hantarkan kepada peguam melalui emel dengan rujukan kes awak${caseRef ? ` **(${caseRef})**` : ''}.`,
-            ].join('\n')
-          : [
-              `Thank you, ${updatedCollected.clientName ?? 'there'}! Your enquiry has been recorded.`,
-              ``,
-              `The lawyer will review your case and get back to you within **5 working days**.`,
-              ``,
-              `In the meantime, please gather the documents we mentioned and send them to the lawyer's email with your case reference${caseRef ? ` **(${caseRef})**` : ''}.`,
-            ].join('\n');
-
-        nextStep = 'done';
-        done = true;
-        break;
-      }
-
-      default: {
-        message  = 'Sesi ini telah tamat. Terima kasih!';
-        nextStep = 'done';
-        done     = true;
       }
     }
 
-    // ── Persistence: append Donna's response while bridge is still ACTIVE ──
-    if (bridgeId && message) {
+    // ── 7. Append Donna's response to transcript ──────────────────────────
+    if (message) {
       try {
-        await appendTurn(bridgeId, {
-          role: 'assistant',
-          content: message,
-          turnIndex: baseTurnIndex,
-        });
+        await appendTurn(bridgeId, { role: 'assistant', content: message, turnIndex: baseTurnIndex });
       } catch (e) {
         console.error('[donna-chat] appendTurn(assistant) failed:', e);
       }
     }
 
-    // ── Finalise bridge AFTER the assistant turn is persisted ──
-    if (done && bridgeId) {
+    // ── 8. Finalize bridge after session complete ─────────────────────────
+    if (done) {
       try {
         await completeBridgeOnIntake(bridgeId, {
-          clientName:   updatedCollected.clientName   ?? null,
-          clientEmail:  updatedCollected.clientEmail  ?? null,
-          clientPhone:  updatedCollected.clientPhone  ?? null,
+          clientName: updatedCollected.clientName ?? null,
+          clientEmail: updatedCollected.clientEmail ?? null,
+          clientPhone: updatedCollected.clientPhone ?? null,
           practiceArea: null,
         });
-      } catch (bridgeErr) {
-        console.error('[donna-chat] completeBridgeOnIntake error:', bridgeErr);
+      } catch (e) {
+        console.error('[donna-chat] completeBridgeOnIntake error:', e);
       }
     }
 
-    return NextResponse.json({ message, nextStep, collected: updatedCollected, done, inquiryId });
+    return NextResponse.json({
+      message,
+      nextStep,
+      agentLabel: phaseToAgentLabel(nextStep),
+      done,
+      inquiryId,
+    });
 
-  } catch (error) {
+  } catch (error: any) {
     console.error('donna-chat error:', error);
-    return NextResponse.json({ error: 'Failed to process message' }, { status: 500 });
+    const isDev = process.env.NODE_ENV === 'development';
+    const detail = isDev ? (error?.message ?? String(error)) : undefined;
+    return NextResponse.json(
+      { error: 'Failed to process message', ...(detail && { detail }) },
+      { status: 500 }
+    );
   }
 }

@@ -111,6 +111,9 @@ model LawyerProfile {
   // { facebook: "url", instagram: "handle", tiktok: "handle", linkedin: "url", ... }
   socialLinks Json?
 
+  // Profile picture (base64 or URL; client-side resized to ≤200px before upload)
+  avatarUrl String?  @db.Text
+
   // Public visibility
   isPublic  Boolean  @default(false)
 
@@ -323,6 +326,18 @@ model DonnaBridge {
   // initialQuestion/initialAnswer by scripts/backfill-bridges.mjs.
   transcript       String?  @db.Text
 
+  // ── Server-authoritative agent state ─────────────────────────
+  // chatPhase is NEVER supplied by the client — it is always read from and
+  // written to by the server. This prevents clients from skipping intake steps.
+  // Values map to the donna-chat state machine: start | name_phone | email_opt |
+  // q1 | q2 | q3 | q4 | q5 | done
+  chatPhase        String   @default("start")
+  agentTurnCount   Int      @default(0)
+
+  // Accumulated entity extraction from Agent A (merged across turns)
+  // { name?, phone?, email?, issueDetails?, docsAcknowledged?, consultation?, urgency?, remarks? }
+  extractedEntities Json?
+
   // Back-reference to scored inquiry
   inquiry          DonnaInquiry?
 
@@ -333,4 +348,5 @@ model DonnaBridge {
   @@index([shortCode])
   @@index([status])
   @@index([conversationId])
+  @@index([chatPhase])
 }

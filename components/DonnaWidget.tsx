@@ -21,6 +21,8 @@ interface DonnaWidgetProps {
   initialMessages?: Array<{ role: 'donna' | 'user'; text: string }>;
   /** When true, renders inline (no floating button, no overlay). */
   embedded?: boolean;
+  /** When true, marks the session as already complete on mount (bridge already done). */
+  initialDone?: boolean;
 }
 
 export default function DonnaWidget({
@@ -31,6 +33,7 @@ export default function DonnaWidget({
   initialGreeting,
   initialMessages,
   embedded = false,
+  initialDone = false,
 }: DonnaWidgetProps) {
   const hasPreload = !!initialMessages?.length;
   const [open, setOpen] = useState(autoOpen || embedded);
@@ -44,13 +47,9 @@ export default function DonnaWidget({
     ...(initialGreeting ? { _initialGreeting: initialGreeting } : {}),
   });
   const [loading, setLoading] = useState(false);
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState(initialDone);
   const startedRef = useRef(hasPreload); // true if messages pre-loaded — blocks API auto-start
   const endRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
 
   // Scroll to top on initial load if messages are pre-loaded (show greeting first)
   useEffect(() => {
@@ -96,19 +95,22 @@ export default function DonnaWidget({
         }),
       });
 
-      if (!res.ok) throw new Error('API error');
       const data = await res.json();
+      if (!res.ok) {
+        const detail = data?.detail ? ` — ${data.detail}` : '';
+        throw new Error(`API error ${res.status}${detail}`);
+      }
 
       setMessages((prev) => [...prev, { role: 'donna', text: data.message }]);
       setStep(data.nextStep);
-      setCollected(data.collected);
+      if (data.collected != null) setCollected(data.collected);
       setDone(data.done ?? false);
       return data;
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: 'donna', text: 'Maaf, terdapat masalah teknikal. Sila cuba lagi sebentar.' },
-      ]);
+    } catch (err: any) {
+      const msg = err?.message
+        ? `Maaf, terdapat masalah teknikal: ${err.message}`
+        : 'Maaf, terdapat masalah teknikal. Sila cuba lagi sebentar.';
+      setMessages((prev) => [...prev, { role: 'donna', text: msg }]);
     } finally {
       setLoading(false);
     }
@@ -118,14 +120,13 @@ export default function DonnaWidget({
     setOpen(true);
     if (!startedRef.current) {
       startedRef.current = true;
-      setStarted(true);
       sendToApi('start');
     }
   }
 
   async function handleSend() {
     const text = input.trim();
-    if (!text || loading || done) return;
+    if (!text || loading || done || step === 'done') return;
 
     const userMsg: Message = { role: 'user', text };
     setMessages((prev) => [...prev, userMsg]);
@@ -147,28 +148,8 @@ export default function DonnaWidget({
 
   // ── EMBEDDED MODE — renders inline, no floating button ──────────────
   if (embedded) {
-    // ── Done state: replace entire widget with Selesai panel ──
-    if (done) {
-      return (
-        <div className="flex flex-col items-center justify-center text-center py-10 gap-5" style={{ minHeight: '360px' }}>
-          <div className="w-16 h-16 rounded-full bg-green-900/40 border border-green-500/40 flex items-center justify-center text-3xl">
-            ✓
-          </div>
-          <div>
-            <p className="text-lg font-bold text-cream mb-1">Selesai</p>
-            <p className="text-sm text-cream/60 leading-relaxed max-w-xs">
-              Maklumat anda telah diterima. Peguam akan beri maklum balas dalam <span className="text-cream/90 font-semibold">5 hari bekerja</span>.
-            </p>
-          </div>
-          <div className="border-t border-white/10 pt-4 w-full text-center">
-            <p className="text-[10px] text-cream/30 uppercase tracking-widest">TanyaPeguam · Donna</p>
-          </div>
-        </div>
-      );
-    }
-
     return (
-      <div className="flex flex-col" style={{ minHeight: '360px', maxHeight: '480px' }}>
+      <div className="flex flex-col flex-1 min-h-0" style={{ minHeight: '280px', maxHeight: '420px' }}>
         {/* Donna identity strip — at top */}
         <div className="flex items-center gap-2 mb-4 pb-4 border-b border-white/10">
           <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-600 to-blue-500 flex items-center justify-center text-white font-bold text-xs flex-shrink-0">
@@ -179,13 +160,22 @@ export default function DonnaWidget({
             <p className="text-[10px] text-cream/45">Pembantu Digital · TanyaPeguam</p>
           </div>
           <div className="ml-auto flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-xs text-green-400">Dalam talian</span>
+            {done ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-white/20" />
+                <span className="text-xs text-cream/30">Selesai</span>
+              </>
+            ) : (
+              <>
+                <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                <span className="text-xs text-green-400">Dalam talian</span>
+              </>
+            )}
           </div>
         </div>
 
         {/* Notification banner — shown during contact collection steps */}
-        {['name', 'phone', 'email_opt'].includes(step) && (
+        {['name_phone', 'email_opt'].includes(step) && (
           <div className="mb-4 p-3 bg-purple-950/50 border border-purple-500/30 rounded-lg">
             <p className="text-sm text-cream/80 leading-relaxed">
               Untuk membantu peguam menilai kes anda dengan lebih lanjut, sila lengkapkan maklumat ringkas melalui Donna.
@@ -197,7 +187,7 @@ export default function DonnaWidget({
         )}
 
         {/* Message thread */}
-        <div className="flex-1 overflow-y-auto space-y-3 pr-1 mb-4">
+        <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1 mb-4">
           {messages.map((msg, i) => (
             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div
@@ -225,24 +215,30 @@ export default function DonnaWidget({
         </div>
 
         {/* Input */}
-        <div className="flex gap-2 border-t border-white/10 pt-4">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={loading}
-            placeholder="Taip mesej anda..."
-            className="flex-1 bg-white/5 border border-white/10 focus:border-purple-500/60 rounded-lg px-3 py-2 text-sm text-cream placeholder-cream/30 outline-none transition"
-          />
-          <button
-            onClick={handleSend}
-            disabled={loading || !input.trim()}
-            className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold text-sm disabled:opacity-40 disabled:cursor-not-allowed transition"
-          >
-            →
-          </button>
-        </div>
+        {done ? (
+          <div className="border-t border-white/10 pt-4 text-center">
+            <p className="text-xs text-cream/30 uppercase tracking-widest">✓ Sesi selesai</p>
+          </div>
+        ) : (
+          <div className="flex gap-2 border-t border-white/10 pt-4">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={loading}
+              placeholder="Taip mesej anda..."
+              className="flex-1 bg-white/5 border border-white/10 focus:border-purple-500/60 rounded-lg px-3 py-2 text-sm text-cream placeholder-cream/30 outline-none transition"
+            />
+            <button
+              onClick={handleSend}
+              disabled={loading || !input.trim()}
+              className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold text-sm disabled:opacity-40 disabled:cursor-not-allowed transition"
+            >
+              →
+            </button>
+          </div>
+        )}
       </div>
     );
   }

@@ -42,6 +42,8 @@ export async function GET() {
         practiceArea: true,
         summary: true,
         chatTranscript: true,
+        chatPhase: true,
+        agentTurnCount: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -64,6 +66,8 @@ export async function GET() {
         practiceArea: b.practiceArea,
         summary: b.summary,
         turnCount: transcript.filter((t) => t.role === 'user').length,
+        chatPhase: b.chatPhase,
+        agentTurnCount: b.agentTurnCount,
         createdAt: b.createdAt,
         updatedAt: b.updatedAt,
       };

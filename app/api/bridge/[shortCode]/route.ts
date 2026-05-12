@@ -1,20 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBridgeByShortCode } from '@/lib/bridge';
+import { phaseToAgentLabel } from '@/lib/donna-context';
 
 /**
  * GET /api/bridge/[shortCode]
  *
- * Public endpoint — no auth. Used by the client-facing /b/[shortCode] page
- * to load the bridge context (lawyer info + initial Q&A) before showing the
- * Donna widget.
+ * Public endpoint — no auth. Used by the client-facing /b/[shortCode] page to
+ * load bridge context (lawyer info + initial Q&A) and for widget state recovery
+ * on page refresh.
  *
- * Returns only public-safe fields. The conversationId is the resume key
- * the widget will store in sessionStorage; it doubles as a soft auth token
- * for /api/chat/donna calls.
- *
- * 404 cases:
- *   - shortCode not found
- *   - bridge.status === 'ABANDONED' or 'COMPLETED' (per audit GC rules)
+ * Returns chatPhase, agentTurnCount, and extractedEntities so the widget can
+ * reconstruct exact conversation state without relying on client storage.
  */
 export async function GET(
   _req: NextRequest,
@@ -30,9 +26,8 @@ export async function GET(
     return NextResponse.json({ error: 'Bridge not found' }, { status: 404 });
   }
 
-  // Closed bridges are not joinable. We return 410 Gone to differentiate
-  // from "never existed" so the client can show a "Sesi luput" page.
-  if (bridge.status === 'ABANDONED' || bridge.status === 'COMPLETED') {
+  // Closed bridges are not joinable — 410 Gone so the client can show "Sesi luput"
+  if (bridge.status === 'COMPLETED' || bridge.status === 'EXPIRED' || bridge.status === 'DELETED') {
     return NextResponse.json(
       { error: `Bridge is ${bridge.status}`, status: bridge.status },
       { status: 410 }
@@ -46,6 +41,13 @@ export async function GET(
     initialQuestion: bridge.initialQuestion,
     initialAnswer: bridge.initialAnswer,
     conversationId: bridge.conversationId,
+
+    // Server-authoritative state (for widget hydration on refresh)
+    chatPhase: bridge.chatPhase,
+    agentTurnCount: bridge.agentTurnCount,
+    agentLabel: phaseToAgentLabel(bridge.chatPhase),
+    extractedEntities: bridge.extractedEntities ?? {},
+
     lawyer: {
       slug: bridge.profile.slug,
       name: bridge.profile.user.name,

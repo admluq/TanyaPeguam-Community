@@ -28,6 +28,7 @@ export async function POST(req: NextRequest) {
       googleReviewUrl,
       socialLinks,
       isPublic,
+      avatarUrl,
     } = body;
 
     if (!slug || typeof slug !== 'string') {
@@ -51,6 +52,7 @@ export async function POST(req: NextRequest) {
       googleReviewUrl: googleReviewUrl || null,
       socialLinks: socialLinks || null,
       isPublic: isPublic ?? false,
+      avatarUrl: avatarUrl || null,
     };
 
     const profile = await db.lawyerProfile.upsert({

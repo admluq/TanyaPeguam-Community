@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import LawyerAvatar from '@/components/LawyerAvatar';
 
 interface SocialLinks {
   facebook?: string;
@@ -55,7 +56,6 @@ export default function DigitalCardPage({ params }: { params: { slug: string } }
   }
 
   const displayName: string  = profile.username || profile.user?.name || 'Peguam';
-  const initials: string     = displayName.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
   const socialLinks: SocialLinks = profile.socialLinks || {};
   const statusInfo = statusConfig[profile.status] || statusConfig.OFFLINE;
 
@@ -80,9 +80,13 @@ export default function DigitalCardPage({ params }: { params: { slug: string } }
 
             {/* Avatar + name block */}
             <div className="flex items-start gap-4">
-              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-600 to-blue-500 flex items-center justify-center text-white font-bold text-xl flex-shrink-0">
-                {initials}
-              </div>
+              <LawyerAvatar
+                avatarUrl={profile.avatarUrl}
+                googleImage={profile.user?.image}
+                name={displayName}
+                size={64}
+                className="rounded-2xl"
+              />
               <div className="pt-1">
                 <h1 className="text-2xl font-bold text-cream leading-tight">{displayName}</h1>
                 {profile.position && (

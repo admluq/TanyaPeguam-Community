@@ -25,18 +25,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
     async session({ session, user, token }) {
       const id = user?.id ?? (token as any).id ?? token.sub ?? undefined;
-      
-      // Fetches lawyer profile for this user
-      const profile = await db.lawyerProfile.findUnique({
-        where: { userId: id },
-      });
+
+      let profile = null;
+      try {
+        profile = await db.lawyerProfile.findUnique({ where: { userId: id } });
+      } catch { /* non-fatal — session still works without profile */ }
 
       return {
         ...session,
         user: {
           ...session.user,
           ...(id ? { id } : {}),
-          ...(profile ? { 
+          ...(profile ? {
             profileId: profile.id,
             profileSlug: profile.slug,
             firmName: profile.firmName,
