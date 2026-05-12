@@ -59,6 +59,9 @@ function generateProbingQuestions(issue: string): string {
 function generateDocumentRecommendations(issue: string, lang: 'ms' | 'en' = 'ms'): string {
   const lower = issue.toLowerCase();
 
+  // Criminal must be checked first — break-in also contains "rumah" which would
+  // otherwise trigger the property branch.
+  const isCriminal    = /pencuri|curi|rompak|pecah rumah|break.?in|stolen|theft|burglar|jenayah|criminal|tangkap|ditangkap|kes polis|laporan polis|IO\b|polis tangkap|DNAA|seksyen\s*4[01]\d|section\s*4[01]\d|exhibit|barang bukti|bahan bukti|jewel|barang kemas|gold|emas|wang tunai|purse|dompet/i.test(lower);
   const isTermination = /buang|pecat|resign|terminate|kerjasama|tamat|gaji|majikan|kerja/.test(lower);
   const isContract    = /kontrak|perjanjian|deal|agreement|bayar|hutang/.test(lower);
   const isProperty    = /hartanah|tanah|rumah|bangunan|property|developer|pemaju|konveyan/.test(lower);
@@ -67,7 +70,22 @@ function generateDocumentRecommendations(issue: string, lang: 'ms' | 'en' = 'ms'
   let docsEn: string;
   let docsMs: string;
 
-  if (isTermination) {
+  if (isCriminal) {
+    docsEn = [
+      `• Original police report (Laporan Polis) for the incident`,
+      `• Photos or receipts proving ownership of the stolen items`,
+      `• Court case number / case reference from the IO or DPP`,
+      `• Any written communications with the Investigating Officer (IO)`,
+      `• Witness statements or AirTag / CCTV evidence (if available)`,
+    ].join('\n');
+    docsMs = [
+      `• Laporan Polis (Repot) asal berkaitan kes tersebut`,
+      `• Gambar atau resit sebagai bukti pemilikan barang yang dicuri`,
+      `• Nombor kes mahkamah / rujukan kes daripada IO atau DPP`,
+      `• Sebarang surat menyurat bertulis dengan Pegawai Penyiasat (IO)`,
+      `• Keterangan saksi atau bukti AirTag / CCTV (jika ada)`,
+    ].join('\n');
+  } else if (isTermination) {
     docsEn = [
       `• Employment contract / Letter of Offer`,
       `• Termination letter or show-cause letter`,
@@ -493,37 +511,53 @@ export async function POST(req: NextRequest) {
               ].filter(l => l !== undefined).join('\n');
           nextStep = 'q3';
         } else {
-          // User asked a question — answer ONE (1) question only
-          // Reference original question + lawyer's context
           const originalQuestion = bridgeQuestion ?? collected.issueSummary ?? '';
+
+          // ── SELF-CORRECTION: user signals documents are wrong category ──
+          // Patterns: "takde agreement", "kes jenayah", "wrong docs", "this is criminal", etc.
+          const isWrongCategorySignal = /takde agreement|tiada agreement|tiada kontrak|no agreement|no contract|ini kes jenayah|this is criminal|kes curi|kes pecah rumah|wrong doc|salah dokumen|bukan kontrak|bukan perjanjian|criminal case|theft case|stolen|robbery|kes rompak|not a contract/i.test(userResponse);
+
+          if (isWrongCategorySignal) {
+            // Re-run doc generation using the original bridge question so the correct
+            // category (criminal, employment, etc.) is detected from source-of-truth text.
+            const correctedDocs = generateDocumentRecommendations(originalQuestion, lang2);
+
+            const apology = lang2 === 'ms'
+              ? `Minta maaf atas kekeliruan itu. Awak betul — saya telah salah kenal pasti kategori kes awak.\n\nMemandangkan Soalan Asal awak adalah berkaitan "${originalQuestion.substring(0, 70)}...", berikut adalah senarai dokumen yang lebih tepat:`
+              : `I apologise for the confusion. You are right — I misidentified the category of your case.\n\nGiven that your original question is about "${originalQuestion.substring(0, 70)}...", here is the corrected document list:`;
+
+            // Strip the preamble from correctedDocs so we can inject the apology before it
+            const docBody = correctedDocs.replace(/^.*?:\n\n/, '').replace(/\n\nSila cari.*$/, '').replace(/\n\nPlease locate.*$/, '');
+            const docOutro = lang2 === 'ms'
+              ? `\n\nSila cari dan sediakan dokumen-dokumen ini. Taip "ok" atau tanya jika ada pertanyaan lanjut.`
+              : `\n\nPlease locate and prepare these. Type "ok" or ask if you have further questions.`;
+
+            message  = `${apology}\n\n${docBody}${docOutro}`;
+            nextStep = 'q2'; // Stay at q2 so user can acknowledge the corrected list
+            break;
+          }
+
+          // ── NORMAL Q2 FAQ: answer ONE question, auto-move to q3 ──
           let answerText = '';
 
-          // Chain of Thought: Analyze the question
           if (userResponse.length > 0) {
-            // Example: Handle document format questions
-            if (userResponse.includes('asal') || userResponse.includes('original') ||
-                userResponse.includes('fotokopi') || userResponse.includes('copy') ||
-                userResponse.includes('gambar') || userResponse.includes('image')) {
+            if (/asal|original|fotokopi|copy|gambar|image|scan/.test(userResponse)) {
               answerText = lang2 === 'ms'
                 ? `Boleh, salinan digital atau gambar dokumen yang jelas sudah memadai untuk penilaian awal peguam. Seperti dalam Jawapan Peguam tadi, dokumen ini penting bagi mengesahkan konteks dalam Soalan Asal awak tentang "${originalQuestion.substring(0, 60)}...".\n\nSebarang soalan khusus saya mohon ajukan kepada peguam.`
                 : `Yes, a clear digital copy or photo of the document is acceptable for the lawyer's initial assessment. As mentioned in the lawyer's previous response, this document is important for confirming the context of your original question about "${originalQuestion.substring(0, 60)}...".\n\nFor any specific questions, please ask the lawyer directly.`;
             } else {
-              // Generic answer for other questions
               answerText = lang2 === 'ms'
                 ? `Pertanyaan awak berkaitan dokumen-dokumen untuk kes awak tentang "${originalQuestion.substring(0, 60)}...". Peguam akan memberikan panduan lebih terperinci semasa konsultasi berdasarkan dokumen yang awak sediakan.\n\nSebarang soalan khusus saya mohon ajukan kepada peguam.`
                 : `Your question is related to the documents needed for your case about "${originalQuestion.substring(0, 60)}...". The lawyer will provide more detailed guidance during the consultation based on the documents you prepare.\n\nFor any specific questions, please ask the lawyer directly.`;
             }
 
-            message = answerText;
-            // Auto-move to q3 after answering
             updatedCollected.docsAcknowledged = true;
 
-            // Add closing + next question
             const nextQMessage = lang2 === 'ms'
               ? `\n\n---\n\nSekarang, bila awak ada masa untuk berunding? Dan apakah mod pilihan awak:\n• 📞 Panggilan telefon\n• 💻 Mesyuarat video\n• 🏢 Temujanji bersemuka`
               : `\n\n---\n\nNow, when are you available to consult? And what is your preferred mode:\n• 📞 Phone call\n• 💻 Video meeting\n• 🏢 In-person appointment`;
 
-            message += nextQMessage;
+            message  = answerText + nextQMessage;
             nextStep = 'q3';
           }
         }
