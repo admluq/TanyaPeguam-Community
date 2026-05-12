@@ -172,6 +172,114 @@ function detectLanguage(text: string): 'ms' | 'en' {
   return matches && matches.length >= 2 ? 'ms' : 'en';
 }
 
+// ── Q3/Q4 vetting helpers ─────────────────────────────────────────────
+
+/** True when user input reads like a question rather than a direct answer */
+function isClientQuestion(text: string): boolean {
+  return /\?|apa(kah)?|bagaimana|boleh ke|berapa|macam mana|bila(kah)?|adakah|how|what|when|where|can i|is it|do i|will|how much|does|are there|kenapa|why|siapa|who/i.test(text);
+}
+
+/**
+ * True when user has given a proper Q3 answer:
+ * contains a time indicator OR a consultation mode.
+ */
+function hasConsultationAnswer(text: string): boolean {
+  const hasTime = /pagi|petang|malam|morning|afternoon|evening|isnin|selasa|rabu|khamis|jumaat|sabtu|ahad|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jam\s*\d|pukul|\d\s*:\s*\d\d|\d\s*am|\d\s*pm|next week|minggu depan|esok|tomorrow|hari ini|today|weekday|weekend|hujung minggu/i.test(text);
+  const hasMode = /telefon|phone|call|video|zoom|google meet|teams|bersemuka|in.person|face.to.face|online|virtual|whatsapp|wechat/i.test(text);
+  return hasTime || hasMode;
+}
+
+/**
+ * True when user has given a proper Q4 urgency answer (yes/no variant).
+ */
+function hasUrgencyAnswer(text: string): boolean {
+  return /\bya\b|\byes\b|\btidak\b|\bno\b|\bnope\b|\burgent\b|\burgency\b|\bkecemasan\b|\bstandard\b|\bbiasa\b|\bnormal\b|\bsegera\b|\bcepat\b|\bnot urgent\b|\btunggu\b|\bwait\b|\blambat\b/i.test(text);
+}
+
+/**
+ * Build a contextual FAQ answer using lawyer profile + service config + donna KB.
+ * Returns the answer + mandatory outro + the repeat question for the current step.
+ */
+function buildFAQAnswer(
+  question: string,
+  svc: Record<string, any> | null,
+  donna: Record<string, any> | null,
+  lawyerName: string,
+  lang: 'ms' | 'en',
+  repeatQ: string,
+): string {
+  const lower = question.toLowerCase();
+
+  const isFeeQ    = /yuran|fee|bayar|berapa|cost|price|charge|how much|percuma|free|rm\s*\d|ringgit/i.test(lower);
+  const isHoursQ  = /waktu|jam|bila|hours|time|when.*available|pukul|hari bekerja|working day|operating/i.test(lower);
+  const isAreaQ   = /negeri|state|area|location|kawasan|mana|where.*office|where.*based/i.test(lower);
+  const isModeQ   = /telefon|phone|video|zoom|bersemuka|physical|in.person|online|mode.*konsult/i.test(lower);
+
+  let answer = '';
+
+  if (isFeeQ) {
+    const parts: string[] = [];
+    if (lang === 'ms') {
+      if (svc?.modKonsultasi === 'PERCUMA') {
+        parts.push(`Konsultasi awal dengan ${lawyerName} adalah **PERCUMA**.`);
+      } else if (svc?.yuranKonsultasi) {
+        parts.push(`Yuran konsultasi standard adalah **RM${svc.yuranKonsultasi}**.`);
+      }
+      if (svc?.yuranVideoMeeting)       parts.push(`Video meeting: **RM${svc.yuranVideoMeeting}**`);
+      if (svc?.yuranMeetingFizikal)     parts.push(`Temujanji bersemuka: **RM${svc.yuranMeetingFizikal}**`);
+      if (svc?.yuranKecemasan)          parts.push(`Yuran kecemasan: **RM${svc.yuranKecemasan}**`);
+      if (!parts.length) parts.push(`Sila hubungi ${lawyerName} terus untuk maklumat yuran terkini.`);
+    } else {
+      if (svc?.modKonsultasi === 'PERCUMA') {
+        parts.push(`Initial consultation with ${lawyerName} is **FREE**.`);
+      } else if (svc?.yuranKonsultasi) {
+        parts.push(`Standard consultation fee is **RM${svc.yuranKonsultasi}**.`);
+      }
+      if (svc?.yuranVideoMeeting)       parts.push(`Video meeting: **RM${svc.yuranVideoMeeting}**`);
+      if (svc?.yuranMeetingFizikal)     parts.push(`In-person appointment: **RM${svc.yuranMeetingFizikal}**`);
+      if (svc?.yuranKecemasan)          parts.push(`Emergency fee: **RM${svc.yuranKecemasan}**`);
+      if (!parts.length) parts.push(`Please contact ${lawyerName} directly for the latest fee information.`);
+    }
+    answer = parts.join('\n');
+
+  } else if (isHoursQ) {
+    const hours = svc?.waktuOperasi ?? null;
+    answer = lang === 'ms'
+      ? (hours ? `${lawyerName} beroperasi pada **${hours}**.` : `Sila hubungi ${lawyerName} terus untuk mengesahkan waktu operasi.`)
+      : (hours ? `${lawyerName} operates on **${hours}**.` : `Please contact ${lawyerName} directly to confirm operating hours.`);
+
+  } else if (isAreaQ) {
+    const negeri = svc?.negeriOperasi ?? null;
+    answer = lang === 'ms'
+      ? (negeri ? `${lawyerName} beroperasi terutamanya di **${negeri}**.` : `Sila hubungi ${lawyerName} untuk mengetahui kawasan operasi.`)
+      : (negeri ? `${lawyerName} operates primarily in **${negeri}**.` : `Please contact ${lawyerName} to find out their operating area.`);
+
+  } else if (isModeQ) {
+    const hasFee = svc?.yuranVideoMeeting || svc?.yuranMeetingFizikal;
+    answer = lang === 'ms'
+      ? `${lawyerName} menerima konsultasi melalui telefon, video meeting, dan temujanji bersemuka.${hasFee ? ` Yuran mungkin berbeza mengikut mod yang dipilih.` : ''}`
+      : `${lawyerName} accepts consultations via phone, video meeting, and in-person appointment.${hasFee ? ` Fees may vary by mode.` : ''}`;
+
+  } else if (donna?.kbContext) {
+    // Fallback: use donna knowledge base
+    const kb = (donna.kbContext as string).substring(0, 300);
+    answer = lang === 'ms'
+      ? `Berdasarkan maklumat yang saya ada: ${kb}${kb.length >= 300 ? '...' : ''}`
+      : `Based on the information I have: ${kb}${kb.length >= 300 ? '...' : ''}`;
+
+  } else {
+    answer = lang === 'ms'
+      ? `Saya tidak mempunyai maklumat spesifik tentang itu. Awak boleh tanya peguam terus semasa konsultasi.`
+      : `I don't have specific information on that. You may ask the lawyer directly during consultation.`;
+  }
+
+  const outro = lang === 'ms'
+    ? `Sebarang soalan khusus saya mohon ajukan kepada peguam.`
+    : `For any specific questions, please ask the lawyer directly.`;
+
+  return `${answer}\n\n${outro}\n\n---\n\n${repeatQ}`;
+}
+
 /**
  * POST /api/donna-chat
  *
@@ -196,17 +304,30 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'slug required' }, { status: 400 });
     }
 
-    // ── Load profile (include lawyer email for Q3) ──────────────
+    // ── Load profile (full service config + donna config for FAQ handling) ──
     const profile = await db.lawyerProfile.findUnique({
       where: { slug },
       select: {
         id: true,
         firmName: true,
+        position: true,
+        bio: true,
         donnaConfig: {
           select: { personality: true, kbContext: true, triageRules: true },
         },
         legalServiceConfig: {
-          select: { emelPertanyaan: true },
+          select: {
+            emelPertanyaan: true,
+            waktuOperasi: true,
+            modKonsultasi: true,
+            yuranKonsultasi: true,
+            yuranKecemasan: true,
+            yuranVideoMeeting: true,
+            yuranVideoMeetingKecemasan: true,
+            yuranMeetingFizikal: true,
+            yuranMeetingFizikalKecemasan: true,
+            negeriOperasi: true,
+          },
         },
         user: { select: { email: true, name: true } },
       },
@@ -413,32 +534,64 @@ export async function POST(req: NextRequest) {
       case 'q3': {
         const preference = (userInput ?? '').trim();
         const lang3 = (collected._lang ?? 'ms') as 'ms' | 'en';
+        const lawyerName3 = profile.user?.name ?? profile.firmName ?? 'peguam';
+        const svc3 = profile.legalServiceConfig as Record<string, any> | null;
+        const donna3 = profile.donnaConfig as Record<string, any> | null;
+
+        const q3Question = lang3 === 'ms'
+          ? [
+              `Bila awak ada masa untuk berunding? Dan apakah mod pilihan awak:`,
+              `• 📞 Panggilan telefon`,
+              `• 💻 Mesyuarat video`,
+              `• 🏢 Temujanji bersemuka`,
+            ].join('\n')
+          : [
+              `When are you available to consult? And what is your preferred mode:`,
+              `• 📞 Phone call`,
+              `• 💻 Video meeting`,
+              `• 🏢 In-person appointment`,
+            ].join('\n');
+
+        // Empty or too short — re-ask
         if (!preference || preference.length < 2) {
-          message = lang3 === 'ms'
-            ? 'Sila beritahu saya ketersediaan dan mod konsultasi pilihan awak.'
-            : 'Please let us know your availability and preferred consultation mode.';
+          message = q3Question;
           nextStep = 'q3';
           break;
         }
+
+        // Client is asking a question — answer it then re-ask Q3
+        if (isClientQuestion(preference) || !hasConsultationAnswer(preference)) {
+          message = buildFAQAnswer(preference, svc3, donna3, lawyerName3, lang3, q3Question);
+          nextStep = 'q3';
+          break;
+        }
+
+        // Proper consultation answer — store and advance
         updatedCollected.consultationPreference = preference;
 
-        message = lang3 === 'ms'
+        const urgencyQ = lang3 === 'ms'
           ? [
               `Faham. Satu lagi perkara — adakah awak perlukan ini diuruskan dengan segera?`,
               ``,
-              `Saya boleh mengatur temujanji seawal mungkin, namun **yuran kecemasan** mungkin dikenakan.`,
+              svc3?.yuranKecemasan
+                ? `Yuran kecemasan adalah **RM${svc3.yuranKecemasan}**.`
+                : `Yuran kecemasan mungkin dikenakan untuk temujanji segera.`,
               ``,
               `• Ya — Saya perlukan ini secepat mungkin`,
               `• Tidak — Tempoh standard adalah baik`,
-            ].join('\n')
+            ].filter(Boolean).join('\n')
           : [
               `Understood. One more thing — do you need this handled urgently?`,
               ``,
-              `We can arrange an appointment as soon as possible, however a **small emergency fee** may apply.`,
+              svc3?.yuranKecemasan
+                ? `Emergency fee is **RM${svc3.yuranKecemasan}**.`
+                : `A small emergency fee may apply for urgent appointments.`,
               ``,
               `• Yes — I need this as soon as possible`,
               `• No — standard timeline is fine`,
-            ].join('\n');
+            ].filter(Boolean).join('\n');
+
+        message  = urgencyQ;
         nextStep = 'q4';
         break;
       }
@@ -446,14 +599,55 @@ export async function POST(req: NextRequest) {
       // ── Q4: EMERGENCY / URGENCY OPTION ───────────────────────
       case 'q4': {
         const urgency = (userInput ?? '').trim();
+        const lang4 = (collected._lang ?? 'ms') as 'ms' | 'en';
+        const lawyerName4 = profile.user?.name ?? profile.firmName ?? 'peguam';
+        const svc4 = profile.legalServiceConfig as Record<string, any> | null;
+        const donna4 = profile.donnaConfig as Record<string, any> | null;
+
+        const q4Question = lang4 === 'ms'
+          ? [
+              `Adakah awak perlukan ini diuruskan dengan segera?`,
+              ``,
+              svc4?.yuranKecemasan
+                ? `Yuran kecemasan adalah **RM${svc4.yuranKecemasan}**.`
+                : `Yuran kecemasan mungkin dikenakan untuk temujanji segera.`,
+              ``,
+              `• Ya — Saya perlukan ini secepat mungkin`,
+              `• Tidak — Tempoh standard adalah baik`,
+            ].filter(Boolean).join('\n')
+          : [
+              `Do you need this handled urgently?`,
+              ``,
+              svc4?.yuranKecemasan
+                ? `Emergency fee is **RM${svc4.yuranKecemasan}**.`
+                : `A small emergency fee may apply for urgent appointments.`,
+              ``,
+              `• Yes — I need this as soon as possible`,
+              `• No — standard timeline is fine`,
+            ].filter(Boolean).join('\n');
+
+        // Empty — re-ask
+        if (!urgency || urgency.length < 1) {
+          message  = q4Question;
+          nextStep = 'q4';
+          break;
+        }
+
+        // Client is asking a question — answer it then re-ask Q4
+        if (isClientQuestion(urgency) || !hasUrgencyAnswer(urgency)) {
+          message  = buildFAQAnswer(urgency, svc4, donna4, lawyerName4, lang4, q4Question);
+          nextStep = 'q4';
+          break;
+        }
+
+        // Proper urgency answer — store and advance
         updatedCollected.urgencyPreference = urgency;
 
-        const lang4 = (collected._lang ?? 'ms') as 'ms' | 'en';
         message = lang4 === 'ms'
           ? [
               `Terima kasih kerana berkongsi semua ini.`,
               ``,
-              `Adakah ada lagi yang anda ingin peguam tahu, atau adakah anda berpuas hati dengan apa yang telah dikongsi? Sila tinggalkan sebarang catatan atau pertanyaan tambahan di bawah.`,
+              `Adakah ada lagi yang awak ingin peguam tahu, atau adakah awak berpuas hati dengan apa yang telah dikongsi? Sila tinggalkan sebarang catatan atau pertanyaan tambahan di bawah.`,
               ``,
               `*(Taip "tiada" jika tiada yang hendak ditambah)*`,
             ].join('\n')
