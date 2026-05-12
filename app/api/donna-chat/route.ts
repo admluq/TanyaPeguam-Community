@@ -1,7 +1,7 @@
 import { db } from '@/lib/db';
 import { NextRequest, NextResponse } from 'next/server';
 import { createInquiry } from '@/lib/inquiry';
-import { completeBridgeOnIntake } from '@/lib/bridge';
+import { completeBridgeOnIntake, appendTurn } from '@/lib/bridge';
 
 // ── Q1: Context-aware probing questions about the problem (Malay) ─────
 function generateProbingQuestions(issue: string): string {
@@ -359,6 +359,37 @@ export async function POST(req: NextRequest) {
     const lawyerEmail = (profile.legalServiceConfig as any)?.emelPertanyaan
       || profile.user?.email
       || null;
+
+    // ── Persistence: hydrate transcript length, append user turn ──
+    // Server-authoritative transcript — the chat log lives in DonnaBridge.chatTranscript,
+    // not in client-side `collected`. This survives browser refresh.
+    let baseTurnIndex = 0;
+    if (bridgeId) {
+      try {
+        const b = await db.donnaBridge.findUnique({
+          where: { id: bridgeId },
+          select: { chatTranscript: true, status: true },
+        });
+        if (b?.status === 'ACTIVE') {
+          baseTurnIndex = Array.isArray(b.chatTranscript) ? b.chatTranscript.length : 0;
+          // Append user turn (skip 'start' — no user input yet)
+          if (userInput && step !== 'start') {
+            try {
+              await appendTurn(bridgeId, {
+                role: 'user',
+                content: userInput,
+                turnIndex: baseTurnIndex,
+              });
+              baseTurnIndex += 1;
+            } catch (e) {
+              console.error('[donna-chat] appendTurn(user) failed:', e);
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[donna-chat] transcript hydrate failed:', e);
+      }
+    }
 
     // Case reference: use bridge shortCode if available, else last 8 chars of bridgeId
     let caseRef = bridgeId ? bridgeId.slice(-8).toUpperCase() : null;
@@ -722,20 +753,9 @@ export async function POST(req: NextRequest) {
           console.error('[donna-chat q5] createInquiry error:', submitErr);
         }
 
-        // ── Step 2: Mark bridge COMPLETED — independent of Step 1 ──
-        if (bridgeId) {
-          try {
-            await completeBridgeOnIntake(bridgeId, {
-              clientName:   updatedCollected.clientName   ?? null,
-              clientEmail:  updatedCollected.clientEmail  ?? null,
-              clientPhone:  updatedCollected.clientPhone  ?? null,
-              practiceArea: null,
-            });
-            console.log('[donna-chat q5] bridge', bridgeId, 'marked COMPLETED');
-          } catch (bridgeErr) {
-            console.error('[donna-chat q5] completeBridgeOnIntake error:', bridgeErr);
-          }
-        }
+        // ── Step 2: bridge finalisation deferred until AFTER the assistant
+        //     turn is appended (done at bottom of handler — must happen while
+        //     status is still ACTIVE so appendTurn doesn't reject the write).
 
         message = lang5 === 'ms'
           ? [
@@ -762,6 +782,33 @@ export async function POST(req: NextRequest) {
         message  = 'Sesi ini telah tamat. Terima kasih!';
         nextStep = 'done';
         done     = true;
+      }
+    }
+
+    // ── Persistence: append Donna's response while bridge is still ACTIVE ──
+    if (bridgeId && message) {
+      try {
+        await appendTurn(bridgeId, {
+          role: 'assistant',
+          content: message,
+          turnIndex: baseTurnIndex,
+        });
+      } catch (e) {
+        console.error('[donna-chat] appendTurn(assistant) failed:', e);
+      }
+    }
+
+    // ── Finalise bridge AFTER the assistant turn is persisted ──
+    if (done && bridgeId) {
+      try {
+        await completeBridgeOnIntake(bridgeId, {
+          clientName:   updatedCollected.clientName   ?? null,
+          clientEmail:  updatedCollected.clientEmail  ?? null,
+          clientPhone:  updatedCollected.clientPhone  ?? null,
+          practiceArea: null,
+        });
+      } catch (bridgeErr) {
+        console.error('[donna-chat] completeBridgeOnIntake error:', bridgeErr);
       }
     }
 
